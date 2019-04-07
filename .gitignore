@@ -1,0 +1,10 @@
+/tmp
+*.jl.mem
+*.jl.cov
+*.jl.*.cov
+docs/build
+/Manifest.toml
+/docs/Manifest.toml
+/docs/src/repl.md
+.DS_Store
+/test/registries/*
