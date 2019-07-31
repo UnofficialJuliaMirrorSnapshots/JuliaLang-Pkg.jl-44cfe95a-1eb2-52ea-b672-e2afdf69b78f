@@ -54,7 +54,8 @@ end
 
 @testset "Pkg.status" begin
     temp_pkg_dir() do project_path
-        Pkg.add(["Example", "Random"])
+        Pkg.add(PackageSpec(name="Example", version="0.5.1"))
+        Pkg.add("Random")
         Pkg.status()
         Pkg.status("Example")
         Pkg.status(["Example", "Random"])
@@ -255,5 +256,16 @@ end
     end end
 end
 
+@testset "Pkg.test" begin
+    temp_pkg_dir() do tmp
+        copy_test_package(tmp, "TestArguments")
+        Pkg.activate(joinpath(tmp, "TestArguments"))
+        # test the old code path (no test/Project.toml)
+        Pkg.test("TestArguments"; test_args=["a", "b"], julia_args = [`--quiet --check-bounds=no`])
+        # test new code path
+        touch(joinpath(tmp, "TestArguments", "test", "Project.toml"))
+        Pkg.test("TestArguments"; test_args=["a", "b"], julia_args = [`--quiet --check-bounds=no`])
+    end
+end
 
 end # module APITests
