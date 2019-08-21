@@ -18,8 +18,8 @@ function depots1()
     return d[1]
 end
 
-logdir() = joinpath(depots1(), "logs")
-devdir() = get(ENV, "JULIA_PKG_DEVDIR", joinpath(depots1(), "dev"))
+logdir(depot = depots1()) = joinpath(depot, "logs")
+devdir(depot = depots1()) = get(ENV, "JULIA_PKG_DEVDIR", joinpath(depots1(), "dev"))
 envdir(depot = depots1()) = joinpath(depot, "environments")
 const UPDATED_REGISTRY_THIS_SESSION = Ref(false)
 
@@ -28,12 +28,14 @@ include("../ext/TOML/src/TOML.jl")
 
 include("GitTools.jl")
 include("PlatformEngines.jl")
+include("BinaryPlatforms.jl")
 include("Types.jl")
 include("Compress.jl")
 include("Display.jl")
 include("Pkg2/Pkg2.jl")
 include("GraphType.jl")
 include("Resolve.jl")
+include("Artifacts.jl")
 include("Operations.jl")
 include("API.jl")
 include("Registry.jl")
@@ -44,6 +46,9 @@ import .Types: UPLEVEL_MAJOR, UPLEVEL_MINOR, UPLEVEL_PATCH, UPLEVEL_FIXED
 import .Types: PKGMODE_MANIFEST, PKGMODE_PROJECT
 # legacy CI script support
 import .API: clone, dir
+
+# Import artifacts API
+using .Artifacts, .PlatformEngines
 
 
 """
@@ -144,8 +149,8 @@ const update = API.up
 
 **Keyword arguments:**
   - `coverage::Bool=false`: enable or disable generation of coverage statistics.
-  - `julia_args::Cmd`: options to be passed the test process.
-  - `test_args::Cmd`: test arguments (`ARGS`) available in the test process.
+  - `julia_args::Union{Cmd, Vector{String}}`: options to be passed the test process.
+  - `test_args::Union{Cmd, Vector{String}}`: test arguments (`ARGS`) available in the test process.
 
 !!! compat "Julia 1.3"
     `julia_args` and `test_args` requires at least Julia 1.3.

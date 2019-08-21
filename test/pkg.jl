@@ -6,6 +6,7 @@ import Random: randstring
 import LibGit2
 using Test
 using UUIDs
+using Dates
 
 using Pkg
 using Pkg.Types
@@ -133,7 +134,13 @@ temp_pkg_dir() do project_path
         Pkg.rm(TEST_PKG.name)
         @test !isinstalled(TEST_PKG)
         pkgdir = joinpath(Pkg.depots1(), "packages")
-        Pkg.gc()
+
+        # Test to ensure that with a long enough collect_delay, nothing gets reaped
+        Pkg.gc(;collect_delay=Day(1000))
+        @test !isempty(readdir(pkgdir))
+
+        # Setting collect_delay to zero causes it to be reaped immediately, howeveage
+        Pkg.gc(;collect_delay=Second(0))
         @test isempty(readdir(pkgdir))
     end
 
@@ -251,8 +258,9 @@ temp_pkg_dir() do project_path
         mktempdir() do devdir
             withenv("JULIA_PKG_DEVDIR" => devdir) do
                 try
-                    Pkg.setprotocol!(domain = "github.com", protocol = "notarealprotocol")
-                    @test_throws PkgError Pkg.develop("Example")
+                    # Test below commented out because it is really slow, https://github.com/JuliaLang/Pkg.jl/issues/1291
+                    #Pkg.setprotocol!(domain = "github.com", protocol = "notarealprotocol")
+                    #@test_throws PkgError Pkg.develop("Example")
                     Pkg.setprotocol!(domain = "github.com", protocol = "https")
                     Pkg.develop("Example")
                     @test isinstalled(TEST_PKG)
@@ -616,7 +624,7 @@ end
         # the following should not error
         Pkg.add("UUIDs")
         Pkg.test("UUIDs")
-        @test_throws PkgError("cannot `pin` stdlibs.") Pkg.pin("UUIDs")
+        @test_throws PkgError("`pin` can not be applied to `UUIDs` because it is a stdlib.") Pkg.pin("UUIDs")
     end
 end
 
@@ -786,5 +794,6 @@ end
 include("repl.jl")
 include("api.jl")
 include("registry.jl")
+include("artifacts.jl")
 
 end # module
