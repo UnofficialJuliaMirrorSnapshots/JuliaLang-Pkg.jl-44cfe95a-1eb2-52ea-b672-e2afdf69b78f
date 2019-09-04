@@ -16,9 +16,33 @@ using ..BinaryPlatforms
 using ..Artifacts: artifact_paths
 
 
-preview_info() = printstyled("───── Preview mode ─────\n"; color=Base.info_color(), bold=true)
+function preview_info(ctx::Context)
+    if ctx.preview
+        printstyled(ctx.io, "───── Preview mode ─────\n"; color=Base.info_color(), bold=true)
+    end
+end
 
 include("generate.jl")
+
+dependencies() = dependencies(Context())
+function dependencies(ctx::Context)::Dict{UUID, PackageInfo}
+    pkgs = PackageSpec[]
+    Operations.load_all_deps!(ctx, pkgs)
+    find_registered!(ctx, UUID[pkg.uuid for pkg in pkgs])
+    return Dict(pkg.uuid => Operations.package_info(ctx, pkg) for pkg in pkgs)
+end
+
+project() = project(Context())
+function project(ctx::Context)
+    ctx.env.pkg !== nothing || pkgerror("Active environment is not a project.")
+    return ProjectInfo(
+        name         = ctx.env.pkg.name,
+        uuid         = ctx.env.pkg.uuid,
+        version      = ctx.env.pkg.version,
+        dependencies = ctx.env.project.deps,
+        path         = ctx.env.project_file
+    )
+end
 
 function check_package_name(x::AbstractString, mode=nothing)
     if !(occursin(Pkg.REPLMode.name_re, x))
@@ -51,7 +75,7 @@ function develop(ctx::Context, pkgs::Vector{PackageSpec}; shared::Bool=true,
             pkgerror("Can not specify version when tracking a repo.")
     end
 
-    ctx.preview && preview_info()
+    preview_info(ctx)
 
     new_git = handle_repos_develop!(ctx, pkgs, shared)
 
@@ -59,7 +83,7 @@ function develop(ctx::Context, pkgs::Vector{PackageSpec}; shared::Bool=true,
         pkgerror("Cannot `develop` package with the same name or uuid as the project")
 
     Operations.develop(ctx, pkgs, new_git; strict=strict, platform=platform)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     return
 end
 
@@ -83,7 +107,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}; strict::Bool=false,
         end
     end
 
-    ctx.preview && preview_info()
+    preview_info(ctx)
     Types.update_registries(ctx)
 
     repo_pkgs = [pkg for pkg in pkgs if (pkg.repo.url !== nothing || pkg.repo.rev !== nothing)]
@@ -100,7 +124,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}; strict::Bool=false,
         pkgerror("Cannot add package with the same name or uuid as the project")
 
     Operations.add(ctx, pkgs, new_git; strict=strict, platform=platform)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     return
 end
 
@@ -123,14 +147,14 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec}; mode=PKGMODE_PROJECT, kwarg
     end
 
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
 
     project_deps_resolve!(ctx, pkgs)
     manifest_resolve!(ctx, pkgs)
     ensure_resolved(ctx, pkgs)
 
     Operations.rm(ctx, pkgs)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     return
 end
 
@@ -147,7 +171,7 @@ function up(ctx::Context, pkgs::Vector{PackageSpec};
     foreach(pkg -> pkg.mode = mode, pkgs)
 
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     if update_registry
         Types.clone_default_registries(ctx)
         Types.update_registries(ctx; force=true)
@@ -168,7 +192,7 @@ function up(ctx::Context, pkgs::Vector{PackageSpec};
         ensure_resolved(ctx, pkgs)
     end
     Operations.up(ctx, pkgs, level)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     return
 end
 
@@ -182,7 +206,7 @@ pin(pkgs::Vector{PackageSpec}; kwargs...)               = pin(Context(), pkgs; k
 function pin(ctx::Context, pkgs::Vector{PackageSpec}; kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
 
     for pkg in pkgs
         pkg.name !== nothing || pkg.uuid !== nothing ||
@@ -206,7 +230,7 @@ free(pkgs::Vector{PackageSpec}; kwargs...)               = free(Context(), pkgs;
 function free(ctx::Context, pkgs::Vector{PackageSpec}; kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
 
     for pkg in pkgs
         pkg.name !== nothing || pkg.uuid !== nothing ||
@@ -240,7 +264,7 @@ function test(ctx::Context, pkgs::Vector{PackageSpec};
     test_args = Cmd(test_args)
     pkgs = deepcopy(pkgs) # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     if isempty(pkgs)
         ctx.env.pkg === nothing && pkgerror("trying to test unnamed project") #TODO Allow this?
         push!(pkgs, ctx.env.pkg)
@@ -254,17 +278,6 @@ function test(ctx::Context, pkgs::Vector{PackageSpec};
     return
 end
 
-installed() = __installed(PKGMODE_PROJECT)
-function __installed(mode::PackageMode=PKGMODE_MANIFEST)
-    diffs = Display.status(Context(), PackageSpec[], mode=mode, use_as_api=true)
-    version_status = Dict{String, Union{VersionNumber,Nothing}}()
-    diffs == nothing && return version_status
-    for entry in diffs
-        version_status[entry.name] = entry.new.ver
-    end
-    return version_status
-end
-
 """
     gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
 
@@ -276,7 +289,7 @@ for a period of `collect_delay`; which defaults to thirty days.
 """
 function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
     Context!(ctx; kwargs...)
-    ctx.preview && preview_info()
+    preview_info(ctx)
     env = ctx.env
 
     # First, we load in our `manifest_usage.toml` files which will tell us when our
@@ -626,9 +639,8 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
         printpkgstyle(ctx, :Deleted, "no artifacts or packages")
     end
 
-    if ctx.preview
-        preview_info()
-    end
+    preview_info(ctx)
+
     return
 end
 
@@ -640,7 +652,7 @@ function build(ctx::Context, pkgs::Vector{PackageSpec}; verbose=false, kwargs...
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
 
-    ctx.preview && preview_info()
+    preview_info(ctx)
     if isempty(pkgs)
         if ctx.env.pkg !== nothing
             push!(pkgs, ctx.env.pkg)
@@ -655,6 +667,7 @@ function build(ctx::Context, pkgs::Vector{PackageSpec}; verbose=false, kwargs...
     manifest_resolve!(ctx, pkgs)
     ensure_resolved(ctx, pkgs)
     Operations.build(ctx, pkgs, verbose)
+    preview_info(ctx)
 end
 
 #####################################
@@ -762,8 +775,8 @@ status(pkgs::Vector{<:AbstractString}; kwargs...) =
     status([check_package_name(pkg) for pkg in pkgs]; kwargs...)
 status(pkgs::Vector{PackageSpec}; kwargs...) = status(Context(), pkgs; kwargs...)
 function status(ctx::Context, pkgs::Vector{PackageSpec}; diff::Bool=false, mode=PKGMODE_PROJECT,
-                kwargs...)
-    Context!(ctx; kwargs...)
+                io::IO=stdout, kwargs...)
+    Context!(ctx; io=io, kwargs...)
     project_resolve!(ctx, pkgs)
     project_deps_resolve!(ctx, pkgs)
     if mode === PKGMODE_MANIFEST

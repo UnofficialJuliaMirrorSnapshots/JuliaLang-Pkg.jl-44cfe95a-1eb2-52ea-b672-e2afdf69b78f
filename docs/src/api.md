@@ -32,6 +32,8 @@ Pkg.gc
 Pkg.status
 Pkg.precompile
 Pkg.setprotocol!
+Pkg.dependencies
+Pkg.project
 ```
 
 

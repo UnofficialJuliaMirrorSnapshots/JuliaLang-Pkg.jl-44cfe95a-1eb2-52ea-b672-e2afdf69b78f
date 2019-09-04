@@ -16,6 +16,17 @@ include("utils.jl")
     end
 end
 
+@testset "Pkg.rm" begin
+    # rm should remove compat entries
+    temp_pkg_dir() do tmp
+        copy_test_package(tmp, "BasicCompat")
+        Pkg.activate(joinpath(tmp, "BasicCompat"))
+        @test haskey(Pkg.Types.Context().env.project.compat, "Example")
+        Pkg.rm("Example")
+        @test !haskey(Pkg.Types.Context().env.project.compat, "Example")
+    end
+end
+
 @testset "Pkg.activate" begin
     temp_pkg_dir() do project_path
         cd_tempdir() do tmp
@@ -77,6 +88,11 @@ end
 end
 
 @testset "Pkg.develop" begin
+    # develop tries to resolve from the manifest
+    temp_pkg_dir() do project_path; with_temp_env() do env_path;
+        Pkg.add(Pkg.PackageSpec(url="https://github.com/00vareladavid/Unregistered.jl"))
+        Pkg.develop("Unregistered")
+    end end
     temp_pkg_dir() do project_path; cd_tempdir() do tmpdir;
         exuuid = UUID("7876af07-990d-54b4-ab0e-23690620f79a") # UUID of Example.jl
         entry = nothing

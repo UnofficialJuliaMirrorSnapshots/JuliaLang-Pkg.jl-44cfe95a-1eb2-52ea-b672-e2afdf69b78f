@@ -10,7 +10,7 @@ import REPL
 using REPL.TerminalMenus
 using ..Types, ..GraphType, ..Resolve, ..Pkg2, ..PlatformEngines, ..GitTools, ..Display
 import ..depots, ..depots1, ..devdir, ..Types.uuid_julia, ..Types.PackageEntry
-import ..Artifacts: ensure_all_artifacts_installed
+import ..Artifacts: ensure_all_artifacts_installed, artifact_names
 using ..BinaryPlatforms
 import ..Pkg
 
@@ -49,7 +49,7 @@ is_dep(ctx::Context, pkg::PackageSpec) =
 function load_direct_deps!(ctx::Context, pkgs::Vector{PackageSpec}; version::Bool=true)
     # load rest of deps normally
     for (name::String, uuid::UUID) in ctx.env.project.deps
-        pkgs[uuid] === nothing || continue # dont duplicate packages
+        pkgs[uuid] === nothing || continue # do not duplicate packages
         entry = manifest_info(ctx, uuid)
         push!(pkgs, entry === nothing ?
               PackageSpec(;uuid=uuid, name=name) :
@@ -66,6 +66,7 @@ end
 
 function load_all_deps!(ctx::Context, pkgs::Vector{PackageSpec}; version::Bool=true)
     for (uuid, entry) in ctx.env.manifest
+        pkgs[uuid] === nothing || continue # do not duplicate packages
         push!(pkgs, PackageSpec(name=entry.name, uuid=uuid, path=entry.path,
                                 version = version ? something(entry.version, VersionSpec()) : VersionSpec(),
                                 repo=entry.repo, tree_hash=entry.tree_hash))
@@ -424,7 +425,9 @@ function deps_graph(ctx::Context, uuid_to_name::Dict{UUID,String}, reqs::Require
     for uuid in uuids
         uuid == uuid_julia && continue
         if !haskey(uuid_to_name, uuid)
-            uuid_to_name[uuid] = registered_name(ctx, uuid)
+            name = registered_name(ctx, uuid)
+            name === nothing && pkgerror("cannot find name corresponding to UUID $(uuid) in a registry")
+            uuid_to_name[uuid] = name
             entry = manifest_info(ctx, uuid)
             entry ≡ nothing && continue
             uuid_to_name[uuid] = entry.name
@@ -560,11 +563,14 @@ function download_artifacts(ctx::Context, pkgs::Vector{PackageSpec};
                             platform::Platform=platform_key_abi())
     for pkg in pkgs
         path = source_path(pkg)
-        # Check to see if this package has an Artifacts.toml
-        artifacts_toml = joinpath(path, "Artifacts.toml")
-        if isfile(artifacts_toml)
-            ensure_all_artifacts_installed(artifacts_toml; platform=platform)
-            write_env_usage(artifacts_toml, "artifact_usage.toml")
+        # Check to see if this package has an (Julia)Artifacts.toml
+        for f in artifact_names
+            artifacts_toml = joinpath(path, f)
+            if isfile(artifacts_toml)
+                ensure_all_artifacts_installed(artifacts_toml; platform=platform)
+                write_env_usage(artifacts_toml, "artifact_usage.toml")
+                break
+            end
         end
     end
 end
@@ -725,7 +731,6 @@ function build(ctx::Context, pkgs::Vector{PackageSpec}, verbose::Bool)
     uuids = UUID[]
     _get_deps!(ctx, pkgs, uuids)
     build_versions(ctx, uuids; might_need_to_resolve=true, verbose=verbose)
-    ctx.preview && preview_info()
 end
 
 function dependency_order_uuids(ctx::Context, uuids::Vector{UUID})::Dict{UUID,Int}
@@ -815,9 +820,9 @@ function build_versions(ctx::Context, uuids::Vector{UUID}; might_need_to_resolve
 
         sandbox(ctx, pkg, source_path, builddir(source_path)) do
             ok = open(log_file, "w") do log
+                std = verbose ? ctx.io : log
                 success(pipeline(gen_build_code(buildfile(source_path)),
-                                 stdout = verbose ? stdout : log,
-                                 stderr = verbose ? stderr : log))
+                                 stdout=std, stderr=std))
             end
             ok && return
             n_lines = isinteractive() ? 100 : 5000
@@ -870,11 +875,10 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec})
         pkg.mode == PKGMODE_PROJECT || continue
         found = false
         for (name::String, uuid::UUID) in ctx.env.project.deps
-            has_name(pkg) && pkg.name == name ||
-            has_uuid(pkg) && pkg.uuid == uuid || continue
-            !has_name(pkg) || pkg.name == name ||
+            pkg.name == name || pkg.uuid == uuid || continue
+            pkg.name == name ||
                 error("project file name mismatch for `$uuid`: $(pkg.name) ≠ $name")
-            !has_uuid(pkg) || pkg.uuid == uuid ||
+            pkg.uuid == uuid ||
                 error("project file UUID mismatch for `$name`: $(pkg.uuid) ≠ $uuid")
             uuid in drop || push!(drop, uuid)
             found = true
@@ -892,6 +896,9 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec})
     if length(ctx.env.project.deps) == n
         println(ctx.io, "No changes")
         return
+    end
+    filter!(ctx.env.project.compat) do (name, _)
+        name in keys(ctx.env.project.deps)
     end
     deps_names = append!(collect(keys(ctx.env.project.deps)),
                          collect(keys(ctx.env.project.extras)))
@@ -977,7 +984,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}, new_git=UUID[];
     # TODO is it still necessary to prune? I don't think so..
     new_apply = download_source(ctx, pkgs)
 
-    # After downloading resolutionary packages, search for Artifacts.toml files
+    # After downloading resolutionary packages, search for (Julia)Artifacts.toml files
     # and ensure they are all downloaded and unpacked as well:
     download_artifacts(ctx, pkgs; platform=platform)
 
@@ -1336,6 +1343,27 @@ function test(ctx::Context, pkgs::Vector{PackageSpec};
                  join(pkgs_errored, ", "),
                  " errored during testing")
     end
+end
+
+function package_info(ctx::Context, pkg::PackageSpec)::PackageInfo
+    entry = manifest_info(ctx, pkg.uuid)
+    if entry === nothing
+        pkgerror("Can not query `$(pkg.name)` because it does not exist in the manifest.",
+                 " Use `Pkg.resolve()` to populate the manifest.")
+    end
+    package_info(ctx, pkg, entry)
+end
+
+function package_info(ctx::Context, pkg::PackageSpec, entry::PackageEntry)::PackageInfo
+    info = PackageInfo(
+        name         = pkg.name,
+        version      = pkg.version != VersionSpec() ? pkg.version : nothing,
+        ispinned     = pkg.pinned,
+        isdeveloped  = pkg.path !== nothing,
+        source       = project_rel_path(ctx, source_path(pkg)),
+        dependencies = collect(values(entry.deps)),
+    )
+    return info
 end
 
 end # module

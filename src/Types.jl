@@ -20,7 +20,7 @@ using SHA
 
 export UUID, pkgID, SHA1, VersionRange, VersionSpec, empty_versionspec,
     Requires, Fixed, merge_requires!, satisfies, ResolverError,
-    PackageSpec, EnvCache, Context, GitRepo, Context!, get_deps,
+    PackageSpec, EnvCache, Context, PackageInfo, ProjectInfo, GitRepo, Context!, get_deps,
     PkgError, pkgerror, has_name, has_uuid, is_stdlib, write_env, write_env_usage, parse_toml, find_registered!,
     project_resolve!, project_deps_resolve!, manifest_resolve!, registry_resolve!, stdlib_resolve!, handle_repos_develop!, handle_repos_add!, ensure_resolved, instantiate_pkg_repo!,
     manifest_info, registered_uuids, registered_paths, registered_uuid, registered_name,
@@ -215,7 +215,14 @@ function manifestfile_path(env_path::String; strict=false)
         maybe_file = joinpath(env_path, name)
         isfile(maybe_file) && return maybe_file
     end
-    return strict ? nothing : joinpath(env_path, "Manifest.toml")
+    if strict
+        return nothing
+    else
+        project = basename(projectfile_path(env_path))
+        idx = findfirst(x -> x == project, Base.project_names)
+        @assert idx !== nothing
+        return joinpath(env_path, Base.manifest_names[idx])
+    end
 end
 
 function find_project_file(env::Union{Nothing,String}=nothing)
@@ -309,7 +316,7 @@ end
 # ENV variables to set some of these defaults?
 Base.@kwdef mutable struct Context
     env::EnvCache = EnvCache()
-    io::IO = stdout
+    io::IO = stderr
     preview::Bool = false
     use_libgit2_for_all_downloads::Bool = false
     use_only_tarballs_for_downloads::Bool = false
@@ -585,17 +592,35 @@ function fresh_clone(ctx::Context, pkg::PackageSpec)
     return temp_repo
 end
 
+function dev_resolve_pkg!(ctx::Context, pkg::PackageSpec)
+    if pkg.uuid === nothing # have to resolve UUID
+        uuid = get(ctx.env.project.deps, pkg.name, nothing)
+        if uuid !== nothing # try to resolve with manifest
+            entry = manifest_info(ctx, uuid)
+            if entry.repo.url !== nothing
+                @debug "Resolving dev repo against manifest."
+                pkg.repo = entry.repo
+                return nothing # no need to continue, found pkg info
+            end
+        end
+        registry_resolve!(ctx, pkg)
+        if pkg.uuid === nothing
+            pkgerror("Package `$pkg.name` could not be found in the manifest ",
+                     "or in a regsitry.")
+        end
+    end
+    paths = registered_paths(ctx, pkg.uuid)
+    isempty(paths) && pkgerror("Package with UUID `$(pkg.uuid)` could not be found in a registry.")
+    _, pkg.repo.url = Types.registered_info(ctx, pkg.uuid, "repo")[1] #TODO look into [1]
+end
+
 function remote_dev_path!(ctx::Context, pkg::PackageSpec, shared::Bool)
     # Only update the registry in case of developing a non-local package
     update_registries(ctx)
-    # We save the repo in case another environement wants to develop from the same repo,
+    # We save the repo in case another environment wants to develop from the same repo,
     # this avoids having to reclone it from scratch.
     if pkg.repo.url === nothing # specified by name or uuid
-        if !has_uuid(pkg)
-            registry_resolve!(ctx, pkg)
-            ensure_resolved(ctx, [pkg]; registry=true)
-        end
-        _, pkg.repo.url = Types.registered_info(ctx, pkg.uuid, "repo")[1] #TODO look into [1]
+        dev_resolve_pkg!(ctx, pkg)
     end
     temp_clone = fresh_clone(ctx, pkg)
     # parse repo to determine dev path
@@ -1352,17 +1377,11 @@ function manifest_info(ctx::Context, uuid::UUID)::Union{PackageEntry,Nothing}
     return get(ctx.env.manifest, uuid, nothing)
 end
 
-# TODO: redirect to ctx stream
-function printpkgstyle(io::IO, cmd::Symbol, text::String, ignore_indent::Bool=false)
+function printpkgstyle(ctx::Context, cmd::Symbol, text::String, ignore_indent::Bool=false)
     indent = textwidth(string(:Downloaded))
     ignore_indent && (indent = 0)
-    printstyled(io, lpad(string(cmd), indent), color=:green, bold=true)
-    println(io, " ", text)
-end
-
-# TODO: use ctx specific context
-function printpkgstyle(ctx::Context, cmd::Symbol, text::String, ignore_indent::Bool=false)
-    printpkgstyle(ctx.io, cmd, text)
+    printstyled(ctx.io, lpad(string(cmd), indent), color=:green, bold=true)
+    println(ctx.io, " ", text)
 end
 
 
@@ -1379,6 +1398,31 @@ function write_env(ctx::Context; display_diff=true)
     old_env = EnvCache(env.env) # load old environment for comparison
     write_project(env.project, env, old_env, ctx; display_diff=display_diff)
     write_manifest(env.manifest, env, old_env, ctx; display_diff=display_diff)
+end
+
+###
+### PackageInfo
+###
+
+Base.@kwdef struct PackageInfo
+    name::String
+    version::Union{Nothing,VersionNumber}
+    ispinned::Bool
+    isdeveloped::Bool
+    source::String
+    dependencies::Vector{UUID}
+end
+
+###
+### ProjectInfo
+###
+
+Base.@kwdef struct ProjectInfo
+    name::String
+    uuid::UUID
+    version::VersionNumber
+    dependencies::Dict{String,UUID}
+    path::String
 end
 
 end # module
