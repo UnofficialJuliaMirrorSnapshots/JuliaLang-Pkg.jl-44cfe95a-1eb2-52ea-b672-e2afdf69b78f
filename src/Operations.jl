@@ -8,8 +8,8 @@ import LibGit2
 
 import REPL
 using REPL.TerminalMenus
-using ..Types, ..GraphType, ..Resolve, ..Pkg2, ..PlatformEngines, ..GitTools, ..Display
-import ..depots, ..depots1, ..devdir, ..Types.uuid_julia, ..Types.PackageEntry
+using ..Types, ..Resolve, ..PlatformEngines, ..GitTools, ..Display
+import ..depots, ..depots1, ..devdir, ..set_readonly, ..Types.uuid_julia, ..Types.PackageEntry
 import ..Artifacts: ensure_all_artifacts_installed, artifact_names
 using ..BinaryPlatforms
 import ..Pkg
@@ -188,41 +188,16 @@ function load_deps(ctx::Context, pkg::PackageSpec)::Dict{String,UUID}
     else
         path = project_rel_path(ctx, source_path(pkg))
         project_file = projectfile_path(path; strict=true)
-        if project_file !== nothing
-            project = read_project(project_file)
-            return project.deps
-        else
-            # Check in REQUIRE file
-            # Remove when packages uses Project files properly
-            deps = Dict{String,UUID}()
-            dep_pkgs = PackageSpec[]
-            stdlib_deps = find_stdlib_deps(ctx, path)
-            for (uuid, name) in stdlib_deps
-                push!(dep_pkgs, PackageSpec(name, uuid))
-            end
-            reqfile = joinpath(path, "REQUIRE")
-            if isfile(reqfile)
-                for r in Pkg2.Reqs.read(reqfile)
-                    r isa Pkg2.Reqs.Requirement || continue
-                    push!(dep_pkgs, PackageSpec(name=r.package))
-                end
-                registry_resolve!(ctx, dep_pkgs)
-                project_deps_resolve!(ctx, dep_pkgs)
-                ensure_resolved(ctx, dep_pkgs; registry=true)
-            end
-            for dep_pkg in dep_pkgs
-                dep_pkg.name == "julia" && continue
-                deps[dep_pkg.name] = dep_pkg.uuid
-            end
-        end
-        return deps
+        project_file === nothing && pkgerror("could not find Project file for package $(pkg.name)")
+        project = read_project(project_file)
+        return project.deps
     end
 end
 
 function collect_project!(ctx::Context, pkg::PackageSpec, path::String, fix_deps_map::Dict{UUID,Vector{PackageSpec}})
     fix_deps_map[pkg.uuid] = valtype(fix_deps_map)()
     project_file = projectfile_path(path; strict=true)
-    (project_file === nothing) && return false
+    (project_file === nothing) && pkgerror("could not find project file for $(pkg.name) at $(path)")
     project = read_package(project_file)
     compat = project.compat
     if haskey(compat, "julia") && !(VERSION in Types.semver_spec(compat["julia"]))
@@ -239,7 +214,7 @@ function collect_project!(ctx::Context, pkg::PackageSpec, path::String, fix_deps
         # @warn "project file for $(pkg.name) is missing a `version` entry"
         set_maximum_version_registry!(ctx, pkg)
     end
-    return true
+    return
 end
 
 is_fixed(pkg::PackageSpec) = pkg.path !== nothing || pkg.repo.url !== nothing
@@ -251,11 +226,7 @@ function collect_fixed!(ctx::Context, pkgs::Vector{PackageSpec}, names::Dict{UUI
         if !isdir(path)
             pkgerror("path $(path) for package $(pkg.name) no longer exists. Remove the package or `develop` it at a new path")
         end
-
-        found_project = collect_project!(ctx, pkg, path, fix_deps_map)
-        if !found_project
-            collect_require!(ctx, pkg, path, fix_deps_map)
-        end
+        collect_project!(ctx, pkg, path, fix_deps_map)
     end
 
     fixed = Dict{UUID,Fixed}()
@@ -318,8 +289,8 @@ function resolve_versions!(ctx::Context, pkgs::Vector{PackageSpec})
     reqs = Requires(pkg.uuid => VersionSpec(pkg.version) for pkg in pkgs if pkg.uuid ≠ uuid_julia)
     fixed[uuid_julia] = Fixed(VERSION)
     graph = deps_graph(ctx, names, reqs, fixed)
-    simplify_graph!(graph)
-    vers = resolve(graph)
+    Resolve.simplify_graph!(graph)
+    vers = Resolve.resolve(graph)
 
     find_registered!(ctx, collect(keys(vers)))
     # update vector of package versions
@@ -335,8 +306,6 @@ function resolve_versions!(ctx::Context, pkgs::Vector{PackageSpec})
     end
     load_tree_hashes!(ctx, pkgs)
 end
-
-include("require.jl")
 
 get_or_make(::Type{T}, d::Dict{K}, k::K) where {T,K} = haskey(d, k) ? convert(T, d[k]) : T()
 get_or_make!(d::Dict{K,V}, k::K) where {K,V} = get!(d, k) do; V() end
@@ -434,7 +403,7 @@ function deps_graph(ctx::Context, uuid_to_name::Dict{UUID,String}, reqs::Require
         end
     end
 
-    return Graph(all_versions, all_deps, all_compat, uuid_to_name, reqs, fixed, #=verbose=# ctx.graph_verbose)
+    return Resolve.Graph(all_versions, all_deps, all_compat, uuid_to_name, reqs, fixed, #=verbose=# ctx.graph_verbose)
 end
 
 function load_urls(ctx::Context, pkgs::Vector{PackageSpec})
