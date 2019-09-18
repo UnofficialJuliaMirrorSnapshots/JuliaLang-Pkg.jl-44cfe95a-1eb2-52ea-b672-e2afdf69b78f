@@ -1,16 +1,21 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
-import Pkg
+
+module Utils
+
+import ..Pkg
+
+export temp_pkg_dir, cd_tempdir, isinstalled, write_build, with_current_env,
+       with_temp_env, with_pkg_env, git_init_and_commit, copy_test_package,
+       git_init_package, add_test_package, add_this_pkg, TEST_SIG, TEST_PKG
 
 function temp_pkg_dir(fn::Function;rm=true)
-    local env_dir
-    local old_load_path
-    local old_depot_path
-    local old_home_project
-    local old_active_project
-    local old_general_registry_url
+    old_load_path = copy(LOAD_PATH)
+    old_depot_path = copy(DEPOT_PATH)
+    old_home_project = Base.HOME_PROJECT[]
+    old_active_project = Base.ACTIVE_PROJECT[]
+    old_general_registry_url = Pkg.Types.DEFAULT_REGISTRIES[1].url
     try
         # Clone the registry only once
-        old_general_registry_url = Pkg.Types.DEFAULT_REGISTRIES[1].url
         generaldir = joinpath(@__DIR__, "registries", "General")
         if !isdir(generaldir)
             mkpath(generaldir)
@@ -21,11 +26,6 @@ function temp_pkg_dir(fn::Function;rm=true)
                 end
             end
         end
-
-        old_load_path = copy(LOAD_PATH)
-        old_depot_path = copy(DEPOT_PATH)
-        old_home_project = Base.HOME_PROJECT[]
-        old_active_project = Base.ACTIVE_PROJECT[]
         empty!(LOAD_PATH)
         empty!(DEPOT_PATH)
         Base.HOME_PROJECT[] = nothing
@@ -75,6 +75,8 @@ function cd_tempdir(f; rm=true)
 end
 
 isinstalled(pkg) = Base.locate_package(Base.PkgId(pkg.uuid, pkg.name)) !== nothing
+# For top level deps
+isinstalled(pkg::String) = Base.find_package(pkg) !== nothing
 
 function write_build(path, content)
     build_filename = joinpath(path, "deps", "build.jl")
@@ -141,8 +143,9 @@ function git_init_package(tmp, path)
     return pkgpath
 end
 
-function copy_test_package(tmpdir::String, name::String)
+function copy_test_package(tmpdir::String, name::String; use_pkg=true)
     cp(joinpath(@__DIR__, "test_packages", name), joinpath(tmpdir, name))
+    use_pkg || return
 
     # The known Pkg UUID, and whatever UUID we're currently using for testing
     known_pkg_uuid = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
@@ -176,4 +179,6 @@ function add_this_pkg()
         path=pkg_dir,
     )
     Pkg.develop(spec)
+end
+
 end

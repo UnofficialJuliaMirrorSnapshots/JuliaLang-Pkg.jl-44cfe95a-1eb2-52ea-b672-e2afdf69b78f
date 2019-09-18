@@ -82,14 +82,14 @@ as any no-longer-necessary manifest packages due to project package removals.
 ],[ :name => "add",
     :handler => do_add!,
     :arg_count => 1 => Inf,
-    :arg_parser => (x -> parse_package(x; add_or_dev=true, valid=[VersionRange, Rev])),
+    :arg_parser => (x -> parse_package(x; add_or_dev=true)),
     :option_spec => OptionDeclaration[
-        [:name => "strict", :api => :strict => true],
+        [:name => "preserve", :takes_arg => true, :api => :preserve => do_preserve],
     ],
     :completions => complete_add_dev,
     :description => "add packages to project",
     :help => md"""
-    add pkg[=uuid] [@version] [#rev] ...
+    add [--preserve=<opt>] pkg[=uuid] [@version] [#rev] ...
 
 Add package `pkg` to the current project file. If `pkg` could refer to
 multiple different packages, specifying `uuid` allows you to disambiguate.
@@ -101,9 +101,23 @@ specified by `#branch` or `#commit`.
 If a local path is used as an argument to `add`, the path needs to be a git repository.
 The project will then track that git repository just like it would track a remote repository online.
 
+`Pkg` resolves the set of packages in your environment using a tiered approach.
+The `--preserve` command line option allows you to key into a specific tier in the resolve algorithm.
+The following table describes the command line arguments to `--preserve` (in order of strictness).
+
+| Argument | Description                                                                         |
+|:---------|:------------------------------------------------------------------------------------|
+| `all`    | Preserve the state of all existing dependencies (including recursive dependencies)  |
+| `direct` | Preserve the state of all existing direct dependencies                              |
+| `semver` | Preserve semver-compatible versions of direct dependencies                          |
+| `none`   | Do not attempt to preserve any version information                                  |
+| `tiered` | Use the tier which will preserve the most version information (this is the default) |
+
+
 **Examples**
 ```
 pkg> add Example
+pkg> add --preserve=all Example
 pkg> add Example@0.5
 pkg> add Example#master
 pkg> add Example#c37b675
@@ -116,7 +130,7 @@ pkg> add Example=7876af07-990d-54b4-ab0e-23690620f79a
     :short_name => "dev",
     :handler => do_develop!,
     :arg_count => 1 => Inf,
-    :arg_parser => (x -> parse_package(x; add_or_dev=true, valid=[VersionRange])),
+    :arg_parser => (x -> parse_package(x; add_or_dev=true)),
     :option_spec => OptionDeclaration[
         [:name => "strict", :api => :strict => true],
         [:name => "local", :api => :shared => false],
@@ -157,7 +171,7 @@ makes the package no longer being checked out.
 ],[ :name => "pin",
     :handler => do_pin!,
     :arg_count => 1 => Inf,
-    :arg_parser => (x -> parse_package(x; valid=[VersionRange])),
+    :arg_parser => parse_package,
     :completions => complete_installed_packages,
     :description => "pins the version of packages",
     :help => md"""
@@ -221,7 +235,7 @@ it will be placed in the first depot of the stack.
     :short_name => "up",
     :handler => do_up!,
     :arg_count => 0 => Inf,
-    :arg_parser => (x -> parse_package(x; valid=[VersionRange])),
+    :arg_parser => parse_package,
     :option_spec => OptionDeclaration[
         [:name => "project",  :short_name => "p", :api => :mode => PKGMODE_PROJECT],
         [:name => "manifest", :short_name => "m", :api => :mode => PKGMODE_MANIFEST],
@@ -303,17 +317,6 @@ the output to the difference as compared to the last git commit.
     gc
 
 Deletes packages that cannot be reached from any existing environment.
-""",
-],[ # preview is not a regular command.
-    # this is here so that preview appears as a registered command to users
-    :name => "preview",
-    :description => "previews a subsequent command without affecting the current state",
-    :help => md"""
-    preview cmd
-
-Runs the command `cmd` in preview mode. This is defined such that no side effects
-will take place i.e. no packages are downloaded and neither the project nor manifest
-is modified.
 """,
 ],
 ], #package

@@ -15,19 +15,11 @@ using Pkg.Types: VersionTypes
 using ..BinaryPlatforms
 using ..Artifacts: artifact_paths
 
-
-function preview_info(ctx::Context)
-    if ctx.preview
-        printstyled(ctx.io, "───── Preview mode ─────\n"; color=Base.info_color(), bold=true)
-    end
-end
-
 include("generate.jl")
 
 dependencies() = dependencies(Context())
 function dependencies(ctx::Context)::Dict{UUID, PackageInfo}
-    pkgs = PackageSpec[]
-    Operations.load_all_deps!(ctx, pkgs)
+    pkgs = Operations.load_all_deps(ctx)
     find_registered!(ctx, UUID[pkg.uuid for pkg in pkgs])
     return Dict(pkg.uuid => Operations.package_info(ctx, pkg) for pkg in pkgs)
 end
@@ -56,6 +48,14 @@ function check_package_name(x::AbstractString, mode=nothing)
     return PackageSpec(x)
 end
 
+function err_rep(pkg::PackageSpec)
+    x = pkg.name !== nothing && pkg.uuid !== nothing ? x = "$name [$(string(pkg.uuid)[1:8])]" :
+        pkg.name !== nothing ? pkg.name :
+        pkg.uuid !== nothing ? string(pkg.uuid)[1:8] :
+        pkg.repo.url
+    return "`$x`"
+end
+
 develop(pkg::Union{AbstractString, PackageSpec}; kwargs...) = develop([pkg]; kwargs...)
 develop(pkgs::Vector{<:AbstractString}; kwargs...) =
     develop([check_package_name(pkg, :develop) for pkg in pkgs]; kwargs...)
@@ -67,15 +67,21 @@ function develop(ctx::Context, pkgs::Vector{PackageSpec}; shared::Bool=true,
 
     for pkg in pkgs
         # if julia is passed as a package the solver gets tricked
-        pkg.name != "julia" || pkgerror("Trying to develop julia as a package")
-        pkg.repo.rev === nothing || pkgerror("git revision can not be given to `develop`")
-        pkg.name !== nothing || pkg.uuid !== nothing || pkg.repo.url !== nothing ||
-            pkgerror("A package must be specified by `name`, `uuid`, `url`, or `path`.")
-        pkg.version == VersionSpec() ||
-            pkgerror("Can not specify version when tracking a repo.")
+        if pkg.name == "julia"
+            pkgerror("`julia` is not a valid package name.")
+        end
+        if pkg.name === nothing && pkg.uuid === nothing && pkg.repo.url === nothing
+            pkgerror("When calling `develop`, packages must be specified by name, UUID, URL, or filesystem path.")
+        end
+        if pkg.repo.rev !== nothing
+            pkgerror("It is invalid to specify a git revision when calling `develop`:",
+                     " `$(pkg.repo.rev)` given for package $(err_rep(pkg)).")
+        end
+        if pkg.version != VersionSpec()
+            pkgerror("It is invalid to specify a version when calling `develop`:",
+                     " `$(pkg.version)` given for package $(err_rep(pkg)).")
+        end
     end
-
-    preview_info(ctx)
 
     new_git = handle_repos_develop!(ctx, pkgs, shared)
 
@@ -83,7 +89,6 @@ function develop(ctx::Context, pkgs::Vector{PackageSpec}; shared::Bool=true,
         pkgerror("Cannot `develop` package with the same name or uuid as the project")
 
     Operations.develop(ctx, pkgs, new_git; strict=strict, platform=platform)
-    preview_info(ctx)
     return
 end
 
@@ -91,23 +96,25 @@ add(pkg::Union{AbstractString, PackageSpec}; kwargs...) = add([pkg]; kwargs...)
 add(pkgs::Vector{<:AbstractString}; kwargs...) =
     add([check_package_name(pkg, :add) for pkg in pkgs]; kwargs...)
 add(pkgs::Vector{PackageSpec}; kwargs...)      = add(Context(), pkgs; kwargs...)
-function add(ctx::Context, pkgs::Vector{PackageSpec}; strict::Bool=false,
+function add(ctx::Context, pkgs::Vector{PackageSpec}; preserve::PreserveLevel=PRESERVE_TIERED,
              platform::Platform=platform_key_abi(), kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
 
     for pkg in pkgs
         # if julia is passed as a package the solver gets tricked; this catches the error early on
-        pkg.name == "julia" && pkgerror("Trying to add julia as a package")
-        pkg.name !== nothing || pkg.uuid !== nothing || pkg.repo.url !== nothing ||
-            pkgerror("A package must be specified by `name`, `uuid`, `url`, or `path`.")
+        if pkg.name == "julia"
+            pkgerror("`julia` is not a valid package name.")
+        end
+        if pkg.name === nothing && pkg.uuid === nothing && pkg.repo.url === nothing
+            pkgerror("When calling `add`, packages must be specified by name, UUID, URL, or filesystem path.")
+        end
         if (pkg.repo.url !== nothing || pkg.repo.rev !== nothing)
             pkg.version == VersionSpec() ||
                 pkgerror("Can not specify version when tracking a repo.")
         end
     end
 
-    preview_info(ctx)
     Types.update_registries(ctx)
 
     repo_pkgs = [pkg for pkg in pkgs if (pkg.repo.url !== nothing || pkg.repo.rev !== nothing)]
@@ -123,8 +130,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}; strict::Bool=false,
     any(pkg -> Types.collides_with_project(ctx, pkg), pkgs) &&
         pkgerror("Cannot add package with the same name or uuid as the project")
 
-    Operations.add(ctx, pkgs, new_git; strict=strict, platform=platform)
-    preview_info(ctx)
+    Operations.add(ctx, pkgs, new_git; preserve=preserve, platform=platform)
     return
 end
 
@@ -137,24 +143,23 @@ function rm(ctx::Context, pkgs::Vector{PackageSpec}; mode=PKGMODE_PROJECT, kwarg
     foreach(pkg -> pkg.mode = mode, pkgs)
 
     for pkg in pkgs
-        pkg.name !== nothing || pkg.uuid !== nothing ||
-            pkgerror("Must specify package by either `name` or `uuid`.")
+        if pkg.name === nothing && pkg.uuid === nothing
+            pkgerror("When calling `rm`, packages must be specified by name or UUID.")
+        end
         if !(pkg.version == VersionSpec() && pkg.pinned == false &&
              pkg.tree_hash === nothing && pkg.repo.url === nothing &&
              pkg.repo.rev === nothing && pkg.path === nothing)
-            pkgerror("Package may only be specified by either `name` or `uuid`")
+            pkgerror("When calling `rm`, packages may only be specified by name or UUID.")
         end
     end
 
     Context!(ctx; kwargs...)
-    preview_info(ctx)
 
     project_deps_resolve!(ctx, pkgs)
     manifest_resolve!(ctx, pkgs)
     ensure_resolved(ctx, pkgs)
 
     Operations.rm(ctx, pkgs)
-    preview_info(ctx)
     return
 end
 
@@ -171,7 +176,6 @@ function up(ctx::Context, pkgs::Vector{PackageSpec};
     foreach(pkg -> pkg.mode = mode, pkgs)
 
     Context!(ctx; kwargs...)
-    preview_info(ctx)
     if update_registry
         Types.clone_default_registries(ctx)
         Types.update_registries(ctx; force=true)
@@ -192,7 +196,6 @@ function up(ctx::Context, pkgs::Vector{PackageSpec};
         ensure_resolved(ctx, pkgs)
     end
     Operations.up(ctx, pkgs, level)
-    preview_info(ctx)
     return
 end
 
@@ -202,17 +205,22 @@ resolve(ctx::Context=Context()) =
 pin(pkg::Union{AbstractString, PackageSpec}; kwargs...) = pin([pkg]; kwargs...)
 pin(pkgs::Vector{<:AbstractString}; kwargs...)          = pin([PackageSpec(pkg) for pkg in pkgs]; kwargs...)
 pin(pkgs::Vector{PackageSpec}; kwargs...)               = pin(Context(), pkgs; kwargs...)
-
 function pin(ctx::Context, pkgs::Vector{PackageSpec}; kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    preview_info(ctx)
 
     for pkg in pkgs
-        pkg.name !== nothing || pkg.uuid !== nothing ||
-            pkgerror("Must specify package by either `name` or `uuid`.")
-        pkg.repo.url === nothing || pkgerror("Can not specify `repo` url")
-        pkg.repo.rev === nothing || pkgerror("Can not specify `repo` rev")
+        if pkg.name === nothing && pkg.uuid === nothing
+            pkgerror("When calling `pin`, packages must be specified by name or UUID.")
+        end
+        if pkg.repo.url !== nothing
+            pkgerror("It is invalid to specify a repo location when calling `pin`:",
+                     " `$(pkg.repo.url)` given for package $(err_rep(pkg)).")
+        end
+        if pkg.repo.rev !== nothing
+            pkgerror("It is invalid to specify a git revision when calling `pin`:",
+                     " `$(pkg.repo.rev)` given for package $(err_rep(pkg)).")
+        end
     end
 
     foreach(pkg -> pkg.mode = PKGMODE_PROJECT, pkgs)
@@ -230,15 +238,15 @@ free(pkgs::Vector{PackageSpec}; kwargs...)               = free(Context(), pkgs;
 function free(ctx::Context, pkgs::Vector{PackageSpec}; kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    preview_info(ctx)
 
     for pkg in pkgs
-        pkg.name !== nothing || pkg.uuid !== nothing ||
-            pkgerror("Must specify package by either `name` or `uuid`.")
+        if pkg.name === nothing && pkg.uuid === nothing
+            pkgerror("When calling `free`, packages must be specified by name or UUID.")
+        end
         if !(pkg.version == VersionSpec() && pkg.pinned == false &&
              pkg.tree_hash === nothing && pkg.repo.url === nothing &&
              pkg.repo.rev === nothing && pkg.path === nothing)
-            pkgerror("Package may only be specified by either `name` or `uuid`")
+            pkgerror("When calling `free`, packages may only be specified by name or UUID.")
         end
     end
 
@@ -264,7 +272,6 @@ function test(ctx::Context, pkgs::Vector{PackageSpec};
     test_args = Cmd(test_args)
     pkgs = deepcopy(pkgs) # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
-    preview_info(ctx)
     if isempty(pkgs)
         ctx.env.pkg === nothing && pkgerror("trying to test unnamed project") #TODO Allow this?
         push!(pkgs, ctx.env.pkg)
@@ -289,7 +296,6 @@ for a period of `collect_delay`; which defaults to thirty days.
 """
 function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
     Context!(ctx; kwargs...)
-    preview_info(ctx)
     env = ctx.env
 
     # First, we load in our `manifest_usage.toml` files which will tell us when our
@@ -349,27 +355,25 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
     all_index_files = Set(filter(isfile, all_index_files))
 
     # Immediately write this back as condensed manifest_usage.toml files
-    if !ctx.preview
-        function write_condensed_usage(usage_by_depot, fname)
-            for (depot, usage) in usage_by_depot
-                # Keep only the keys of the files that are still extant
-                usage = filter(p -> p[1] in all_index_files, usage)
+    function write_condensed_usage(usage_by_depot, fname)
+        for (depot, usage) in usage_by_depot
+            # Keep only the keys of the files that are still extant
+            usage = filter(p -> p[1] in all_index_files, usage)
 
-                # Expand it back into a dict of arrays-of-dicts
-                usage = Dict(k => [Dict("time" => v)] for (k, v) in usage)
+            # Expand it back into a dict of arrays-of-dicts
+            usage = Dict(k => [Dict("time" => v)] for (k, v) in usage)
 
-                # Write it out to disk within this depot
-                usage_path = joinpath(logdir(depot), fname)
-                if !isempty(usage) || isfile(usage_path)
-                    open(usage_path, "w") do io
-                        TOML.print(io, usage, sorted=true)
-                    end
+            # Write it out to disk within this depot
+            usage_path = joinpath(logdir(depot), fname)
+            if !isempty(usage) || isfile(usage_path)
+                open(usage_path, "w") do io
+                    TOML.print(io, usage, sorted=true)
                 end
             end
         end
-        write_condensed_usage(manifest_usage_by_depot, "manifest_usage.toml")
-        write_condensed_usage(artifact_usage_by_depot, "artifact_usage.toml")
     end
+    write_condensed_usage(manifest_usage_by_depot, "manifest_usage.toml")
+    write_condensed_usage(artifact_usage_by_depot, "artifact_usage.toml")
 
     # Next, we will process the manifest.toml and artifacts.toml files separately,
     # extracting from them the paths of the packages and artifacts that they reference.
@@ -553,8 +557,8 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
         merge_orphanages!(new_orphanage, depot_orphaned_packages, packages_to_delete, old_orphanage)
         merge_orphanages!(new_orphanage, depot_orphaned_artifacts, artifacts_to_delete, old_orphanage)
 
-        # Write out the `new_orphanage` for this depot, if we're not in preview mode.
-        if !ctx.preview && (!isempty(new_orphanage) || isfile(orphanage_file))
+        # Write out the `new_orphanage` for this depot
+        if !isempty(new_orphanage) || isfile(orphanage_file)
             mkpath(dirname(orphanage_file))
             open(orphanage_file, "w") do io
                 TOML.print(io, new_orphanage, sorted=true)
@@ -586,12 +590,10 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
     # Delete paths for unreachable package versions and artifacts, and computing size saved
     function delete_path(path)
         path_size = recursive_dir_size(path)
-        if !ctx.preview
-            try
-                Base.rm(path; recursive=true)
-            catch
-                @warn "Failed to delete $path"
-            end
+        try
+            Base.rm(path; recursive=true)
+        catch
+            @warn "Failed to delete $path"
         end
         printpkgstyle(ctx, :Deleted, Types.pathrepr(path) * " (" * pretty_byte_str(path_size) * ")")
         return path_size
@@ -607,18 +609,16 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
     end
 
     # Prune package paths that are now empty
-    if !ctx.preview
-        for depot in depots()
-            packagedir = abspath(depot, "packages")
-            !isdir(packagedir) && continue
+    for depot in depots()
+        packagedir = abspath(depot, "packages")
+        !isdir(packagedir) && continue
 
-            for name in readdir(packagedir)
-                name_path = joinpath(packagedir, name)
-                !isdir(name_path) && continue
-                !isempty(readdir(name_path)) && continue
+        for name in readdir(packagedir)
+            name_path = joinpath(packagedir, name)
+            !isdir(name_path) && continue
+            !isempty(readdir(name_path)) && continue
 
-                Base.rm(name_path)
-            end
+            Base.rm(name_path)
         end
     end
 
@@ -639,8 +639,6 @@ function gc(ctx::Context=Context(); collect_delay::Period=Day(30), kwargs...)
         printpkgstyle(ctx, :Deleted, "no artifacts or packages")
     end
 
-    preview_info(ctx)
-
     return
 end
 
@@ -652,7 +650,6 @@ function build(ctx::Context, pkgs::Vector{PackageSpec}; verbose=false, kwargs...
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     Context!(ctx; kwargs...)
 
-    preview_info(ctx)
     if isempty(pkgs)
         if ctx.env.pkg !== nothing
             push!(pkgs, ctx.env.pkg)
@@ -667,7 +664,6 @@ function build(ctx::Context, pkgs::Vector{PackageSpec}; verbose=false, kwargs...
     manifest_resolve!(ctx, pkgs)
     ensure_resolved(ctx, pkgs)
     Operations.build(ctx, pkgs, verbose)
-    preview_info(ctx)
 end
 
 precompile() = precompile(Context())
@@ -709,6 +705,19 @@ instantiate(; kwargs...) = instantiate(Context(); kwargs...)
 function instantiate(ctx::Context; manifest::Union{Bool, Nothing}=nothing,
                      update_registry::Bool=true, verbose::Bool=false, kwargs...)
     Context!(ctx; kwargs...)
+    if !isfile(ctx.env.project_file) && isfile(ctx.env.manifest_file)
+        _manifest = Pkg.Types.read_manifest(ctx.env.manifest_file)
+        deps = Dict()
+        for (uuid, pkg) in _manifest
+            if pkg.name in keys(deps)
+                # TODO, query what package to put in Project when in interactive mode?
+                pkgerror("cannot instantiate a manifest without project file when the manifest has multiple packages with the same name ($(pkg.name))")
+            end
+            deps[pkg.name] = string(uuid)
+        end
+        Types.write_project(Dict("deps" => deps), ctx.env.project_file)
+        return instantiate(Context(); manifest=manifest, update_registry=update_registry, verbose=verbose, kwargs...)
+    end
     if (!isfile(ctx.env.manifest_file) && manifest == nothing) || manifest == false
         up(ctx; update_registry=update_registry)
         return
@@ -726,8 +735,7 @@ function instantiate(ctx::Context; manifest::Union{Bool, Nothing}=nothing,
     end
     Operations.is_instantiated(ctx) && return
     Types.update_registries(ctx)
-    pkgs = PackageSpec[]
-    Operations.load_all_deps!(ctx, pkgs)
+    pkgs = Operations.load_all_deps(ctx)
     Operations.check_registered(ctx, pkgs)
     new_git = UUID[]
     for pkg in pkgs
@@ -855,10 +863,13 @@ function Package(;name::Union{Nothing,AbstractString} = nothing,
                  uuid::Union{Nothing,String,UUID} = nothing,
                  version::Union{VersionNumber, String, VersionSpec, Nothing} = nothing,
                  url = nothing, rev = nothing, path=nothing, mode::PackageMode = PKGMODE_PROJECT)
-    path !== nothing && url !== nothing &&
-        pkgerror("cannot specify both a path and url")
-    url !== nothing && version !== nothing &&
-        pkgerror("`version` can not be given with `url`, use `rev` instead")
+    if path !== nothing && url !== nothing
+        pkgerror("It is invalid to specify both `path` and `url`.")
+    end
+    if url !== nothing && version !== nothing
+        pkgerror("It is invalid to specify both `version` and `url`.",
+                 "Hint: `rev` may have been intended instead of `version.")
+    end
     repo = Types.GitRepo(rev = rev, url = url !== nothing ? url : path)
     version = version === nothing ? VersionSpec() : VersionSpec(version)
     uuid isa String && (uuid = UUID(uuid))

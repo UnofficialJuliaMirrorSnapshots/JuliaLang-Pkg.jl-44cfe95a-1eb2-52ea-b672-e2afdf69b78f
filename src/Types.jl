@@ -12,7 +12,7 @@ using REPL.TerminalMenus
 
 using ..TOML
 import ..Pkg, ..UPDATED_REGISTRY_THIS_SESSION
-import Pkg: GitTools, depots, depots1, logdir
+import Pkg: GitTools, depots, depots1, logdir, set_readonly
 import ..BinaryPlatforms: Platform
 
 import Base: SHA1
@@ -27,6 +27,7 @@ export UUID, pkgID, SHA1, VersionRange, VersionSpec, empty_versionspec,
     read_project, read_package, read_manifest, pathrepr, registries,
     PackageMode, PKGMODE_MANIFEST, PKGMODE_PROJECT, PKGMODE_COMBINED,
     UpgradeLevel, UPLEVEL_FIXED, UPLEVEL_PATCH, UPLEVEL_MINOR, UPLEVEL_MAJOR,
+    PreserveLevel, PRESERVE_ALL, PRESERVE_DIRECT, PRESERVE_SEMVER, PRESERVE_TIERED, PRESERVE_NONE,
     PackageSpecialAction, PKGSPEC_NOTHING, PKGSPEC_PINNED, PKGSPEC_FREED, PKGSPEC_DEVELOPED, PKGSPEC_TESTED, PKGSPEC_REPO_ADDED,
     printpkgstyle,
     projectfile_path, manifestfile_path,
@@ -132,6 +133,7 @@ end
 # PackageSpec #
 ###############
 @enum(UpgradeLevel, UPLEVEL_FIXED, UPLEVEL_PATCH, UPLEVEL_MINOR, UPLEVEL_MAJOR)
+@enum(PreserveLevel, PRESERVE_ALL, PRESERVE_DIRECT, PRESERVE_SEMVER, PRESERVE_TIERED, PRESERVE_NONE)
 @enum(PackageMode, PKGMODE_PROJECT, PKGMODE_MANIFEST, PKGMODE_COMBINED)
 @enum(PackageSpecialAction, PKGSPEC_NOTHING, PKGSPEC_PINNED, PKGSPEC_FREED,
                             PKGSPEC_DEVELOPED, PKGSPEC_TESTED, PKGSPEC_REPO_ADDED)
@@ -317,7 +319,6 @@ end
 Base.@kwdef mutable struct Context
     env::EnvCache = EnvCache()
     io::IO = stderr
-    preview::Bool = false
     use_libgit2_for_all_downloads::Bool = false
     use_only_tarballs_for_downloads::Bool = false
     # NOTE: The JULIA_PKG_CONCURRENCY environment variable is likely to be removed in
@@ -375,6 +376,7 @@ collides_with_project(ctx::Context, pkg::PackageSpec) =
 is_project(ctx::Context, pkg::PackageSpec) = is_project_uuid(ctx, pkg.uuid)
 is_project_name(ctx::Context, name::String) =
     ctx.env.pkg !== nothing && ctx.env.pkg.name == name
+is_project_name(ctx::Context, name::Nothing) = false
 is_project_uuid(ctx::Context, uuid::UUID) = project_uuid(ctx) == uuid
 
 ###########
@@ -723,6 +725,7 @@ function instantiate_pkg_repo!(ctx::Context, pkg::PackageSpec, cached_repo::Unio
     isdir(version_path) && return false
     mkpath(version_path)
     mv(cached_repo, version_path; force=true)
+    set_readonly(version_path)
     return true
 end
 
@@ -898,31 +901,42 @@ end
 
 # Ensure that all packages are fully resolved
 function ensure_resolved(ctx::Context,
-    pkgs::AbstractVector{PackageSpec};
-    registry::Bool=false,)::Nothing
-    unresolved = Dict{String,Vector{UUID}}()
+        pkgs::AbstractVector{PackageSpec};
+        registry::Bool=false,)::Nothing
+        unresolved_uuids = Dict{String,Vector{UUID}}()
     for name in [pkg.name for pkg in pkgs if !has_uuid(pkg)]
         uuids = [uuid for (uuid, entry) in ctx.env.manifest if entry.name == name]
         sort!(uuids, by=uuid -> uuid.value)
-        unresolved[name] = uuids
+        unresolved_uuids[name] = uuids
     end
-    isempty(unresolved) && return
+    unresolved_names = UUID[]
+    for uuid in [pkg.uuid for pkg in pkgs if !has_name(pkg)]
+        push!(unresolved_names, uuid)
+    end
+    isempty(unresolved_uuids) && isempty(unresolved_names) && return
     msg = sprint() do io
-        println(io, "The following package names could not be resolved:")
-        for (name, uuids) in sort!(collect(unresolved), by=lowercase ∘ first)
-        print(io, " * $name (")
-        if length(uuids) == 0
-            what = ["project", "manifest"]
-            registry && push!(what, "registry")
-            print(io, "not found in ")
-            join(io, what, ", ", " or ")
-        else
-            join(io, uuids, ", ", " or ")
-            print(io, " in manifest but not in project")
+        if !isempty(unresolved_uuids)
+            println(io, "The following package names could not be resolved:")
+            for (name, uuids) in sort!(collect(unresolved_uuids), by=lowercase ∘ first)
+                print(io, " * $name (")
+                if length(uuids) == 0
+                    what = ["project", "manifest"]
+                    registry && push!(what, "registry")
+                    print(io, "not found in ")
+                    join(io, what, ", ", " or ")
+                else
+                    join(io, uuids, ", ", " or ")
+                    print(io, " in manifest but not in project")
+                end
+                println(io, ")")
+            end
         end
-        println(io, ")")
-    end
-        print(io, "Please specify by known `name=uuid`.")
+        if !isempty(unresolved_names)
+            println(io, "The following package uuids could not be resolved:")
+            for uuid in unresolved_names
+                println(io, " * $uuid")
+            end
+        end
     end
     pkgerror(msg)
 end
@@ -1004,10 +1018,6 @@ end
 clone_or_cp_registries(regs::Vector{RegistrySpec}, depot::String=depots1()) =
     clone_or_cp_registries(Context(), regs, depot)
 function clone_or_cp_registries(ctx::Context, regs::Vector{RegistrySpec}, depot::String=depots1())
-    if ctx.preview
-        println(ctx.io, "Skipping adding registries in preview mode")
-        return nothing
-    end
     populate_known_registries_with_urls!(regs)
     for reg in regs
         if reg.path !== nothing && reg.url !== nothing
@@ -1119,10 +1129,6 @@ end
 
 # entry point for `registry rm`
 function remove_registries(ctx::Context, regs::Vector{RegistrySpec})
-    if ctx.preview
-        println(ctx.io, "skipping removing registries in preview mode")
-        return nothing
-    end
     for registry in find_installed_registries(ctx, regs)
         printpkgstyle(ctx, :Removing, "registry `$(registry.name)` from $(Base.contractuser(registry.path))")
         rm(registry.path; force=true, recursive=true)
@@ -1135,10 +1141,6 @@ function update_registries(ctx::Context, regs::Vector{RegistrySpec} = collect_re
                            force::Bool=false)
     !force && UPDATED_REGISTRY_THIS_SESSION[] && return
     errors = Tuple{String, String}[]
-    if ctx.preview
-        println(ctx.io, "skipping updating registries in preview mode")
-        return nothing
-    end
     for reg in unique(r -> r.uuid, find_installed_registries(ctx, regs))
         if isdir(joinpath(reg.path, ".git"))
             regpath = pathrepr(reg.path)
@@ -1365,11 +1367,9 @@ function pathrepr(path::String)
     return "`" * Base.contractuser(path) * "`"
 end
 
-function write_env(ctx::Context; display_diff=true)
-    env = ctx.env
-    old_env = EnvCache(env.env) # load old environment for comparison
-    write_project(env.project, env, old_env, ctx; display_diff=display_diff)
-    write_manifest(env.manifest, env, old_env, ctx; display_diff=display_diff)
+function write_env(env::EnvCache)
+    write_project(env)
+    write_manifest(env)
 end
 
 ###

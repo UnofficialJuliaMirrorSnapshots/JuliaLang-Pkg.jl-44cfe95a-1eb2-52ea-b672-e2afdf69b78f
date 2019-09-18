@@ -17,13 +17,26 @@ function complete_activate(options, partial, i1, i2)
 end
 
 function complete_local_dir(s, i1, i2)
+    expanded_user = false
     if !isempty(s) && s[1] == '~'
-        return String[expanduser(s)], i1:i2, true
+        expanded_user = true
+        s = expanduser(s)
+        oldi2 = i2
+        i2 += textwidth(homedir()) - 1
     end
 
     cmp = REPL.REPLCompletions.complete_path(s, i2)
     completions = [REPL.REPLCompletions.completion_text(p) for p in cmp[1]]
     completions = filter!(x -> isdir(s[1:prevind(s, first(cmp[2])-i1+1)]*x), completions)
+    if expanded_user
+        if length(completions) == 1 && endswith(joinpath(homedir(), ""), first(completions))
+            completions = [joinpath(s, "")]
+        else
+            completions = [joinpath(homedir(), x) for x in completions]
+        end
+        return completions, i1:oldi2, true
+    end
+
     return completions, cmp[2], !isempty(completions)
 end
 
@@ -119,7 +132,13 @@ function complete_argument(spec::CommandSpec, options::Vector{String},
                            index::Int)
     spec.completions === nothing && return String[]
     # finish parsing opts
-    opts = APIOptions(map(parse_option, options), spec.option_specs)
+    local opts
+    try
+        opts = APIOptions(map(parse_option, options), spec.option_specs)
+    catch e
+        e isa PkgError && return String[]
+        rethrow()
+    end
     return applicable(spec.completions, opts, partial, offset, index) ?
         spec.completions(opts, partial, offset, index) :
         spec.completions(opts, partial)
@@ -131,12 +150,12 @@ function _completions(input, final, offset, index)
     statement, partial = core_parse(words)
     final && (partial = "") # last token is finalized -> no partial
     # number of tokens which specify the command
-    command_size = count([statement.preview, statement.super !== nothing, true])
+    command_size = count([statement.super !== nothing, true])
     command_is_focused() = !((word_count == command_size && final) || word_count > command_size)
 
     if statement.spec === nothing # spec not determined -> complete command
         !command_is_focused() && return String[], 0:-1, false
-        x = complete_command(statement, final, word_count == (statement.preview ? 3 : 2))
+        x = complete_command(statement, final, word_count == 2)
     else
         command_is_focused() && return String[], 0:-1, false
 

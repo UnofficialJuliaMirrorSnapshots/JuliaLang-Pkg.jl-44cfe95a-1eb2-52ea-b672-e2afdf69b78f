@@ -227,10 +227,6 @@ function apply_versions(ctx::Context, pkgs::Vector{PackageSpec}, hashes::Dict{UU
     for i in 1:ctx.num_concurrent_downloads
         @async begin
             for (pkg, path) in jobs
-                if ctx.preview
-                    put!(results, (pkg, true, path))
-                    continue
-                end
                 if ctx.use_libgit2_for_all_downloads
                     put!(results, (pkg, false, path))
                     continue
@@ -270,11 +266,9 @@ function apply_versions(ctx::Context, pkgs::Vector{PackageSpec}, hashes::Dict{UU
     ##################################################
     for (pkg, path) in missed_packages
         uuid = pkg.uuid
-        if !ctx.preview
-            install_git(ctx, pkg.uuid, pkg.name, hashes[uuid], urls[uuid], pkg.version::VersionNumber, path)
-            if mode == :add
-                set_readonly(path)
-            end
+        install_git(ctx, pkg.uuid, pkg.name, hashes[uuid], urls[uuid], pkg.version::VersionNumber, path)
+        if mode == :add
+            set_readonly(path)
         end
         vstr = pkg.version != nothing ? "v$(pkg.version)" : "[$h]"
         printpkgstyle(ctx, :Installed, string(rpad(pkg.name * " ", max_name + 2, "─"), " ", vstr))
@@ -320,7 +314,8 @@ function _add_or_develop(ctx::Context, pkgs::Vector{PackageSpec}; new_git = UUID
     # resolve & apply package versions
     _resolve_versions!(ctx, pkgs)
     new_apply = apply_versions(ctx, pkgs; mode=mode)
-    write_env(ctx) # write env before building
+    Display.print_env_diff(ctx)
+    write_env(ctx.env) # write env before building
     build_versions(ctx, union(new_apply, new_git))
 end
 # Find repos and hashes for each package UUID & version
@@ -522,7 +517,7 @@ function with_dependencies_loadable_at_toplevel(f, mainctx::Context, pkg::Packag
         not_loadable = setdiff(should_be_in_manifest, should_be_in_project)
         Pkg.API.rm(localctx, [PackageSpec(uuid = uuid) for uuid in not_loadable])
 
-        write_env(localctx, display_diff = false)
+        write_env(localctx.env)
         will_resolve && build_versions(localctx, new)
 
         sep = Sys.iswindows() ? ';' : ':'
@@ -537,10 +532,6 @@ function backwards_compatibility_for_test(
     coverage; julia_args=``, test_args=``
 )
     printpkgstyle(ctx, :Testing, pkg.name)
-    if ctx.preview
-        @info("In preview mode, skipping tests for $(pkg.name)")
-        return
-    end
     code = """
         $(Base.load_path_setup_code(false))
         cd($(repr(dirname(testfile))))

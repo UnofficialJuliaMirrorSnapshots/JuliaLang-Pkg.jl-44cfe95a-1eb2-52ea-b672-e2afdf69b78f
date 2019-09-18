@@ -1,6 +1,7 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 module OperationsTest
+import ..Pkg # ensure we are using the correct Pkg
 
 import Random: randstring
 import LibGit2
@@ -14,7 +15,7 @@ using Pkg.Types
 import Random: randstring
 import LibGit2
 
-include("utils.jl")
+using ..Utils
 
 const TEST_PKG = (name = "Example", uuid = UUID("7876af07-990d-54b4-ab0e-23690620f79a"))
 const PackageSpec = Pkg.Types.PackageSpec
@@ -121,16 +122,12 @@ end
 end
 
 temp_pkg_dir() do project_path
-    @testset "simple add and remove with preview" begin
+    @testset "simple add, remove and gc" begin
         Pkg.activate(project_path)
-        Pkg.add(TEST_PKG.name; preview = true)
-        @test !isinstalled(TEST_PKG)
         Pkg.add(TEST_PKG.name)
         @test isinstalled(TEST_PKG)
         @eval import $(Symbol(TEST_PKG.name))
         @test_throws SystemError open(pathof(eval(Symbol(TEST_PKG.name))), "w") do io end  # check read-only
-        Pkg.rm(TEST_PKG.name; preview = true)
-        @test isinstalled(TEST_PKG)
         Pkg.rm(TEST_PKG.name)
         @test !isinstalled(TEST_PKG)
         pkgdir = joinpath(Pkg.depots1(), "packages")
@@ -146,6 +143,8 @@ temp_pkg_dir() do project_path
 
     @testset "package with wrong UUID" begin
         @test_throws PkgError Pkg.add(PackageSpec(TEST_PKG.name, UUID(UInt128(1))))
+        # Missing uuid
+        @test_throws PkgError Pkg.add(PackageSpec(uuid = uuid4()))
     end
 
     @testset "adding and upgrading different versions" begin
@@ -170,7 +169,6 @@ temp_pkg_dir() do project_path
     end
 
     @testset "testing" begin
-        # TODO: Check that preview = true doesn't actually execute the test
         Pkg.add(TEST_PKG.name)
         Pkg.test(TEST_PKG.name; coverage=true)
         pkgdir = Base.locate_package(Base.PkgId(TEST_PKG.uuid, TEST_PKG.name))
@@ -303,6 +301,9 @@ temp_pkg_dir() do project_path
     @testset "check logging" begin
         usage = Pkg.TOML.parse(String(read(joinpath(Pkg.logdir(), "manifest_usage.toml"))))
         manifest = Types.safe_realpath(joinpath(project_path, "Manifest.toml"))
+        @show keys(usage)
+        @show manifest
+        @show usage
         @test any(x -> startswith(x, manifest), keys(usage))
     end
 
@@ -351,15 +352,6 @@ temp_pkg_dir() do project_path
         Pkg.add("JSON"; use_only_tarballs_for_downloads=true)
         @test "JSON" in [pkg.name for (uuid, pkg) in Pkg.dependencies()]
         Pkg.rm("JSON")
-    end
-end
-
-@testset "preview generate" begin
-    mktempdir() do tmp
-        cd(tmp) do
-            Pkg.generate("Foo"; preview=true)
-            @test !isdir(joinpath(tmp, "Foo"))
-        end
     end
 end
 
@@ -761,6 +753,24 @@ end
     end end
 end
 
+@testset "instantiate of lonely manifest" begin
+    temp_pkg_dir() do project_path
+       # noproject_dir =
+       manifest_dir = joinpath(@__DIR__, "manifest", "noproject")
+        cd(manifest_dir) do
+            try
+                Pkg.activate(".")
+                Pkg.instantiate()
+                @test Base.active_project() == abspath("Project.toml")
+                @test isinstalled("Example")
+                @test isinstalled("x1")
+            finally
+                rm("Project.toml"; force=true)
+            end
+        end
+    end
+end
+
 @testset "up should prune manifest" begin
     example_uuid = UUID("7876af07-990d-54b4-ab0e-23690620f79a")
     unicode_uuid = UUID("4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5")
@@ -804,10 +814,5 @@ end
         @test xs[TEST_PKG.uuid].ispinned == false
     end end
 end
-
-include("repl.jl")
-include("api.jl")
-include("registry.jl")
-include("artifacts.jl")
 
 end # module
