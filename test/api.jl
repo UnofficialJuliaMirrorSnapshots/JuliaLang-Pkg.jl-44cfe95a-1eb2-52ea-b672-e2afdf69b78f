@@ -4,7 +4,7 @@ module APITests
 import ..Pkg # ensure we are using the correct Pkg
 
 using Pkg, Test
-import Pkg.Types.PkgError, Pkg.Types.ResolverError
+import Pkg.Types.PkgError, Pkg.Resolve.ResolverError
 using UUIDs
 
 using ..Utils
@@ -24,8 +24,10 @@ end
         copy_test_package(tmp, "BasicCompat")
         Pkg.activate(joinpath(tmp, "BasicCompat"))
         @test haskey(Pkg.Types.Context().env.project.compat, "Example")
+        @test haskey(Pkg.Types.Context().env.project.compat, "julia")
         Pkg.rm("Example")
         @test !haskey(Pkg.Types.Context().env.project.compat, "Example")
+        @test haskey(Pkg.Types.Context().env.project.compat, "julia")
     end
 end
 
@@ -119,7 +121,7 @@ end
                 manifest = Pkg.Types.read_manifest(joinpath(env_path, "Manifest.toml"))
                 entry = manifest[uuids["Foo"]]
                 @test entry.name == "Foo"
-                @test entry.path == absolute_path
+                @test realpath(entry.path) == realpath(absolute_path)
                 @test isdir(entry.path)
             end
         end

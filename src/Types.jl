@@ -20,7 +20,7 @@ using SHA
 
 export UUID, pkgID, SHA1, VersionRange, VersionSpec, empty_versionspec,
     Requires, Fixed, merge_requires!, satisfies, ResolverError,
-    PackageSpec, EnvCache, Context, PackageInfo, ProjectInfo, GitRepo, Context!, get_deps,
+    PackageSpec, EnvCache, Context, PackageInfo, ProjectInfo, GitRepo, Context!, get_deps, err_rep,
     PkgError, pkgerror, has_name, has_uuid, is_stdlib, write_env, write_env_usage, parse_toml, find_registered!,
     project_resolve!, project_deps_resolve!, manifest_resolve!, registry_resolve!, stdlib_resolve!, handle_repos_develop!, handle_repos_add!, ensure_resolved, instantiate_pkg_repo!,
     manifest_info, registered_uuids, registered_paths, registered_uuid, registered_name,
@@ -29,80 +29,19 @@ export UUID, pkgID, SHA1, VersionRange, VersionSpec, empty_versionspec,
     UpgradeLevel, UPLEVEL_FIXED, UPLEVEL_PATCH, UPLEVEL_MINOR, UPLEVEL_MAJOR,
     PreserveLevel, PRESERVE_ALL, PRESERVE_DIRECT, PRESERVE_SEMVER, PRESERVE_TIERED, PRESERVE_NONE,
     PackageSpecialAction, PKGSPEC_NOTHING, PKGSPEC_PINNED, PKGSPEC_FREED, PKGSPEC_DEVELOPED, PKGSPEC_TESTED, PKGSPEC_REPO_ADDED,
-    printpkgstyle,
+    printpkgstyle, isurl,
     projectfile_path, manifestfile_path,
     RegistrySpec
 
 include("versions.jl")
 
-## ordering of UUIDs ##
-
-if VERSION < v"1.2.0-DEV.269"  # Defined in Base as of #30947
-    Base.isless(a::UUID, b::UUID) = a.value < b.value
-end
-
-## Computing UUID5 values from (namespace, key) pairs ##
-function uuid5(namespace::UUID, key::String)
-    data = [reinterpret(UInt8, [namespace.value]); codeunits(key)]
-    u = reinterpret(UInt128, sha1(data)[1:16])[1]
-    u &= 0xffffffffffff0fff3fffffffffffffff
-    u |= 0x00000000000050008000000000000000
-    return UUID(u)
-end
-uuid5(namespace::UUID, key::AbstractString) = uuid5(namespace, String(key))
-
-const uuid_dns = UUID(0x6ba7b810_9dad_11d1_80b4_00c04fd430c8)
-const uuid_julia_project = uuid5(uuid_dns, "julialang.org")
-const uuid_package = uuid5(uuid_julia_project, "package")
-const uuid_registry = uuid5(uuid_julia_project, "registry")
-const uuid_julia = uuid5(uuid_package, "julia")
+const URL_regex = r"((git|ssh|http(s)?)|(git@[\w\-\.]+))(:(//)?)([\w\.@\:/\-~]+)(\.git)?(/)?"x
 
 ## user-friendly representation of package IDs ##
 function pkgID(p::UUID, uuid_to_name::Dict{UUID,String})
     name = get(uuid_to_name, p, "(unknown)")
     uuid_short = string(p)[1:8]
     return "$name [$uuid_short]"
-end
-
-####################
-# Requires / Fixed #
-####################
-const Requires = Dict{UUID,VersionSpec}
-
-struct Fixed
-    version::VersionNumber
-    requires::Requires
-end
-Fixed(v::VersionNumber) = Fixed(v, Requires())
-
-Base.:(==)(a::Fixed, b::Fixed) = a.version == b.version && a.requires == b.requires
-Base.hash(f::Fixed, h::UInt) = hash((f.version, f.requires), h + (0x68628b809fd417ca % UInt))
-
-Base.show(io::IO, f::Fixed) = isempty(f.requires) ?
-    print(io, "Fixed(", repr(f.version), ")") :
-    print(io, "Fixed(", repr(f.version), ",", f.requires, ")")
-
-
-struct ResolverError <: Exception
-    msg::AbstractString
-    ex::Union{Exception,Nothing}
-end
-ResolverError(msg::AbstractString) = ResolverError(msg, nothing)
-
-function Base.showerror(io::IO, pkgerr::ResolverError)
-    print(io, pkgerr.msg)
-    if pkgerr.ex !== nothing
-        pkgex = pkgerr.ex
-        if isa(pkgex, CompositeException)
-            for cex in pkgex
-                print(io, "\n=> ")
-                showerror(io, cex)
-            end
-        else
-            print(io, "\n")
-            showerror(io, pkgex)
-        end
-    end
 end
 
 #################
@@ -140,14 +79,15 @@ end
 
 const VersionTypes = Union{VersionNumber,VersionSpec,UpgradeLevel}
 
-# The url field can also be a local path, rename?
 Base.@kwdef mutable struct GitRepo
-    url::Union{Nothing,String} = nothing
+    source::Union{Nothing,String} = nothing
     rev::Union{Nothing,String} = nothing
 end
 
 Base.:(==)(r1::GitRepo, r2::GitRepo) =
-    r1.url == r2.url && r1.rev == r2.rev
+    r1.source == r2.source && r1.rev == r2.rev
+
+isurl(r::String) = occursin(URL_regex, r)
 
 Base.@kwdef mutable struct PackageSpec
     name::Union{Nothing,String} = nothing
@@ -165,6 +105,14 @@ PackageSpec(name::AbstractString, uuid::UUID) = PackageSpec(;name=name, uuid=uui
 PackageSpec(name::AbstractString, version::VersionTypes) = PackageSpec(;name=name, version=version)
 PackageSpec(n::AbstractString, u::UUID, v::VersionTypes) = PackageSpec(;name=n, uuid=u, version=v)
 
+function err_rep(pkg::PackageSpec)
+    x = pkg.name !== nothing && pkg.uuid !== nothing ? x = "$(pkg.name) [$(string(pkg.uuid)[1:8])]" :
+        pkg.name !== nothing ? pkg.name :
+        pkg.uuid !== nothing ? string(pkg.uuid)[1:8] :
+        pkg.repo.source
+    return "`$x`"
+end
+
 has_name(pkg::PackageSpec) = pkg.name !== nothing
 has_uuid(pkg::PackageSpec) = pkg.uuid !== nothing
 
@@ -177,8 +125,8 @@ function Base.show(io::IO, pkg::PackageSpec)
     pkg.path !== nothing && push!(f, "dev/path" => pkg.path)
     pkg.pinned && push!(f, "pinned" => pkg.pinned)
     push!(f, "version" => (vstr == "VersionSpec(\"*\")" ? "*" : vstr))
-    if pkg.repo.url !== nothing
-        push!(f, "url/path" => string("\"", pkg.repo.url, "\""))
+    if pkg.repo.source !== nothing
+        push!(f, "url/path" => string("\"", pkg.repo.source, "\""))
     end
     if pkg.repo.rev !== nothing
         push!(f, "rev" => pkg.repo.rev)
@@ -188,11 +136,6 @@ function Base.show(io::IO, pkg::PackageSpec)
         print(io, "  ", field, " = ", value, "\n")
     end
     print(io, ")")
-end
-
-function Base.getindex(pkgs::Vector{PackageSpec}, uuid::UUID)
-    index = findfirst(pkg -> pkg.uuid == uuid, pkgs)
-    return index === nothing ? nothing : pkgs[index]
 end
 
 ############
@@ -247,7 +190,7 @@ function find_project_file(env::Union{Nothing,String}=nothing)
     @assert project_file isa String &&
         (isfile(project_file) || !ispath(project_file) ||
          isdir(project_file) && isempty(readdir(project_file)))
-    return safe_realpath(project_file)
+    return Pkg.safe_realpath(project_file)
 end
 
 Base.@kwdef mutable struct Project
@@ -278,13 +221,13 @@ const Manifest = Dict{UUID,PackageEntry}
 
 function Base.show(io::IO, pkg::PackageEntry)
     f = []
-    pkg.name      !== nothing && push!(f, "name"      => pkg.name)
-    pkg.version   !== nothing && push!(f, "version"   => pkg.version)
-    pkg.tree_hash !== nothing && push!(f, "tree_hash" => pkg.tree_hash)
-    pkg.path      !== nothing && push!(f, "dev/path"  => pkg.path)
-    pkg.pinned                && push!(f, "pinned"    => pkg.pinned)
-    pkg.repo.url  !== nothing && push!(f, "url/path"  => "`$(pkg.repo.url)`")
-    pkg.repo.rev  !== nothing && push!(f, "rev"       => pkg.repo.rev)
+    pkg.name        !== nothing && push!(f, "name"      => pkg.name)
+    pkg.version     !== nothing && push!(f, "version"   => pkg.version)
+    pkg.tree_hash   !== nothing && push!(f, "tree_hash" => pkg.tree_hash)
+    pkg.path        !== nothing && push!(f, "dev/path"  => pkg.path)
+    pkg.pinned                  && push!(f, "pinned"    => pkg.pinned)
+    pkg.repo.source !== nothing && push!(f, "url/path"  => "`$(pkg.repo.source)`")
+    pkg.repo.rev    !== nothing && push!(f, "rev"       => pkg.repo.rev)
     print(io, "PackageEntry(\n")
     for (field, value) in f
         print(io, "  ", field, " = ", value, "\n")
@@ -309,28 +252,15 @@ mutable struct EnvCache
     project::Project
     manifest::Manifest
 
+    # What these where at creation of the EnvCache
+    original_project::Project
+    original_manifest::Manifest
+
     # registered package info:
     uuids::Dict{String,Vector{UUID}}
     paths::Dict{UUID,Vector{String}}
     names::Dict{UUID,Vector{String}}
 end
-
-# ENV variables to set some of these defaults?
-Base.@kwdef mutable struct Context
-    env::EnvCache = EnvCache()
-    io::IO = stderr
-    use_libgit2_for_all_downloads::Bool = false
-    use_only_tarballs_for_downloads::Bool = false
-    # NOTE: The JULIA_PKG_CONCURRENCY environment variable is likely to be removed in
-    # the future. It currently stands as an unofficial workaround for issue #795.
-    num_concurrent_downloads::Int = haskey(ENV, "JULIA_PKG_CONCURRENCY") ? parse(Int, ENV["JULIA_PKG_CONCURRENCY"]) : 8
-    graph_verbose::Bool = false
-    stdlibs::Dict{UUID,String} = stdlib()
-    currently_running_target::Bool = false
-end
-
-include("project.jl")
-include("manifest.jl")
 
 function EnvCache(env::Union{Nothing,String}=nothing)
     project_file = find_project_file(env)
@@ -365,9 +295,28 @@ function EnvCache(env::Union{Nothing,String}=nothing)
         project_package,
         project,
         manifest,
+        deepcopy(project),
+        deepcopy(manifest),
         uuids,
         paths,
         names,)
+end
+
+include("project.jl")
+include("manifest.jl")
+
+# ENV variables to set some of these defaults?
+Base.@kwdef mutable struct Context
+    env::EnvCache = EnvCache()
+    io::IO = stderr
+    use_libgit2_for_all_downloads::Bool = false
+    use_only_tarballs_for_downloads::Bool = false
+    # NOTE: The JULIA_PKG_CONCURRENCY environment variable is likely to be removed in
+    # the future. It currently stands as an unofficial workaround for issue #795.
+    num_concurrent_downloads::Int = haskey(ENV, "JULIA_PKG_CONCURRENCY") ? parse(Int, ENV["JULIA_PKG_CONCURRENCY"]) : 8
+    graph_verbose::Bool = false
+    stdlibs::Dict{UUID,String} = stdlib()
+    currently_running_target::Bool = false
 end
 
 project_uuid(ctx::Context) = ctx.env.pkg === nothing ? nothing : ctx.env.pkg.uuid
@@ -452,8 +401,6 @@ function get_deps(project::Project, target::Union{Nothing,String}=nothing)
 end
 get_deps(env::EnvCache, target::Union{Nothing,String}=nothing) =
     get_deps(env.project, target)
-get_deps(ctx::Context, target::Union{Nothing,String}=nothing) =
-    get_deps(ctx.env, target)
 
 function project_compatibility(ctx::Context, name::String)
     compat = get(ctx.env.project.compat, name, nothing)
@@ -491,31 +438,13 @@ function read_package(f::String)
 end
 
 const refspecs = ["+refs/*:refs/remotes/cache/*"]
-const reg_pkg = r"(?:^|[\/\\])(\w+?)(?:\.jl)?(?:\.git)?(?:[\/\\])?$"
 
-# Windows sometimes throw on `isdir`...
-function isdir_windows_workaround(path::String)
-    try isdir(path)
-    catch e
-        false
-    end
-end
-
-# try to call realpath on as much as possible
-function safe_realpath(path)
-    ispath(path) && return realpath(path)
-    a, b = splitdir(path)
-    return joinpath(safe_realpath(a), b)
-end
 function relative_project_path(ctx::Context, path::String)
     # compute path relative the project
     # realpath needed to expand symlinks before taking the relative path
-    return relpath(safe_realpath(abspath(path)),
-                   safe_realpath(dirname(ctx.env.project_file)))
+    return relpath(Pkg.safe_realpath(abspath(path)),
+                   Pkg.safe_realpath(dirname(ctx.env.project_file)))
 end
-
-casesensitive_isdir(dir::String) =
-    isdir_windows_workaround(dir) && basename(dir) in readdir(joinpath(dir, ".."))
 
 function git_checkout_latest!(ctx::Context, repo_path::AbstractString)
     LibGit2.with(LibGit2.GitRepo(repo_path)) do repo
@@ -540,47 +469,16 @@ function git_checkout_latest!(ctx::Context, repo_path::AbstractString)
     end
 end
 
-# Developing a local package, just point `pkg.path` to it
-# - Absolute paths should stay absolute
-# - Relative paths are given relative pwd() so we
-#   translate that to be relative the project instead.
-function explicit_dev_path(ctx::Context, pkg::PackageSpec)
-    path = pkg.repo.url
-    pkg.path = isabspath(path) ? path : relative_project_path(ctx, path)
-    parse_package!(ctx, pkg, path)
-end
-
-function canonical_dev_path!(ctx::Context, pkg::PackageSpec, shared::Bool; default=nothing)
-    dev_dir = shared ? Pkg.devdir() : joinpath(dirname(ctx.env.project_file), "dev")
-    dev_path = joinpath(dev_dir, pkg.name)
-
-    if casesensitive_isdir(dev_path)
-        if !isfile(joinpath(dev_path, "src", pkg.name * ".jl"))
-            pkgerror("Path `$(dev_path)` exists but it does not contain `src/$(pkg.name).jl")
-        end
-        println(ctx.io,
-                "Path `$(dev_path)` exists and looks like the correct package. Using existing path.")
-        default !== nothing && rm(default; force=true, recursive=true)
-        pkg.path = shared ? dev_path : relative_project_path(ctx, dev_path)
-        parse_package!(ctx, pkg, dev_path)
-    elseif default !== nothing
-        mkpath(dev_dir)
-        mv(default, dev_path)
-        # Save the path as relative if it is a --local dev, otherwise put in the absolute path.
-        pkg.path = shared ? dev_path : relative_project_path(ctx, dev_path)
-    end
-end
-
-function fresh_clone(ctx::Context, pkg::PackageSpec)
+function fresh_clone(ctx::Context, url::String)
     clone_path = joinpath(depots1(), "clones")
     mkpath(clone_path)
-    repo_path = joinpath(clone_path, string(hash(pkg.repo.url), "_full"))
+    repo_path = joinpath(clone_path, string(hash(url), "_full"))
     # make sure you have a fresh clone
     repo = nothing
     try
-        repo = GitTools.ensure_clone(ctx, repo_path, pkg.repo.url)
+        repo = GitTools.ensure_clone(ctx, repo_path, url)
         Base.shred!(LibGit2.CachedCredentials()) do creds
-            GitTools.fetch(ctx, repo, pkg.repo.url; refspecs=refspecs, credentials=creds)
+            GitTools.fetch(ctx, repo, url; refspecs=refspecs, credentials=creds)
         end
     finally
         repo isa LibGit2.GitRepo && LibGit2.close(repo)
@@ -592,56 +490,87 @@ function fresh_clone(ctx::Context, pkg::PackageSpec)
     return temp_repo
 end
 
-function dev_resolve_pkg!(ctx::Context, pkg::PackageSpec)
-    if pkg.uuid === nothing # have to resolve UUID
-        uuid = get(ctx.env.project.deps, pkg.name, nothing)
-        if uuid !== nothing # try to resolve with manifest
-            entry = manifest_info(ctx, uuid)
-            if entry.repo.url !== nothing
-                @debug "Resolving dev repo against manifest."
-                pkg.repo = entry.repo
-                return nothing # no need to continue, found pkg info
-            end
-        end
-        registry_resolve!(ctx, pkg)
-        if pkg.uuid === nothing
-            pkgerror("Package `$pkg.name` could not be found in the manifest ",
-                     "or in a regsitry.")
-        end
-    end
-    paths = registered_paths(ctx, pkg.uuid)
-    isempty(paths) && pkgerror("Package with UUID `$(pkg.uuid)` could not be found in a registry.")
-    _, pkg.repo.url = Types.registered_info(ctx, pkg.uuid, "repo")[1] #TODO look into [1]
+function devpath(ctx::Context, name::String, shared::Bool)
+    dev_dir = shared ? Pkg.devdir() : joinpath(dirname(ctx.env.project_file), "dev")
+    return joinpath(dev_dir, name)
 end
 
-function remote_dev_path!(ctx::Context, pkg::PackageSpec, shared::Bool)
-    # Only update the registry in case of developing a non-local package
-    update_registries(ctx)
-    # We save the repo in case another environment wants to develop from the same repo,
-    # this avoids having to reclone it from scratch.
-    if pkg.repo.url === nothing # specified by name or uuid
-        dev_resolve_pkg!(ctx, pkg)
-    end
-    temp_clone = fresh_clone(ctx, pkg)
-    # parse repo to determine dev path
+function is_tracking_repo(ctx::Context, name::String)::Bool
+    uuid = get(ctx.env.project.deps, name, nothing)
+    uuid === nothing && return false
+    entry = manifest_info(ctx, uuid)
+    entry === nothing && return false
+    return entry.repo.source !== nothing
+end
+
+# The return value says wether we are using a new clone
+function move_to_dev_path!(ctx::Context, pkg::PackageSpec, shared::Bool, temp_clone::String)::Bool
+    new = false
     parse_package!(ctx, pkg, temp_clone)
-    canonical_dev_path!(ctx, pkg, shared; default=temp_clone)
-    return pkg.uuid
+    dev_path = devpath(ctx, pkg.name, shared)
+    if isdir(dev_path)
+        parse_package!(ctx, pkg, dev_path)
+        println(ctx.io, "Path `$(dev_path)` exists and looks like the correct package. Using existing path.")
+        rm(temp_clone; recursive=true)
+    else
+        mkpath(dirname(dev_path))
+        mv(temp_clone, dev_path)
+        new = true
+    end
+    pkg.path = shared ? dev_path : relative_project_path(ctx, dev_path)
+    return new
+end
+
+function handle_repo_develop!(ctx::Context, pkg::PackageSpec, shared::Bool)
+    new = false
+    pkg.special_action = PKGSPEC_DEVELOPED
+    if pkg.repo.source !== nothing && !isurl(pkg.repo.source) # explicit path
+        given_abspath = isabspath(pkg.repo.source)
+        pkg.repo.source = try
+            realpath(pkg.repo.source)
+        catch
+            pkgerror("Dev path `$(pkg.repo.source)` does not exist")
+        end
+        parse_package!(ctx, pkg, pkg.repo.source)
+        pkg.path = given_abspath ? pkg.repo.source : relative_project_path(ctx, pkg.repo.source)
+    elseif pkg.name !== nothing && isdir(devpath(ctx, pkg.name, shared)) # existing dev path
+        dev_path = devpath(ctx, pkg.name, shared)
+        parse_package!(ctx, pkg, dev_path)
+        println(ctx.io, "Path `$(dev_path)` exists and looks like the correct package. Using existing path.")
+        pkg.path = shared ? dev_path : relative_project_path(ctx, dev_path)
+    elseif pkg.repo.source !== nothing # explicit URL
+        temp_clone = fresh_clone(ctx, pkg.repo.source)
+        new = move_to_dev_path!(ctx, pkg, shared, temp_clone)
+    elseif pkg.uuid === nothing && is_tracking_repo(ctx, pkg.name)
+        entry = manifest_info(ctx, ctx.env.project.deps[pkg.name])
+        dev_path = devpath(ctx, entry.name, shared)
+        if isdir(dev_path)
+            parse_package!(ctx, pkg, dev_path)
+            println(ctx.io, "Path `$(dev_path)` exists and looks like the correct package. Using existing path.")
+        end
+        # TODO check this, I might have deleted an else :|
+        temp_clone = fresh_clone(ctx, entry.repo.source)
+        new = move_to_dev_path!(ctx, pkg, shared, temp_clone)
+    else # resolve against registry
+        update_registries(ctx)
+        registry_resolve!(ctx, pkg)
+        if pkg.name === nothing || pkg.uuid === nothing
+            pkgerror("Package $(err_rep(pkg)) could not be found in a registry.") # TODO test this
+        end
+        paths = registered_paths(ctx, pkg.uuid)
+        isempty(paths) && pkgerror("Package $(err_rep(pkg)) could not be found in a registry.")
+        _, location = Types.registered_info(ctx, pkg.uuid, "repo")[1] #TODO look into [1]
+        temp_clone = fresh_clone(ctx, location)
+        new = move_to_dev_path!(ctx, pkg, shared, temp_clone)
+    end
+    return new
 end
 
 function handle_repos_develop!(ctx::Context, pkgs::AbstractVector{PackageSpec}, shared::Bool)
     new_uuids = UUID[]
     for pkg in pkgs
-        pkg.special_action = PKGSPEC_DEVELOPED
-        if pkg.repo.url !== nothing && isdir_windows_workaround(pkg.repo.url)
-            explicit_dev_path(ctx, pkg)
-        elseif pkg.name !== nothing
-            canonical_dev_path!(ctx, pkg, shared)
-        end
-        if pkg.path === nothing
-            new_uuid = remote_dev_path!(ctx, pkg, shared)
-            push!(new_uuids, new_uuid)
-        end
+        new = handle_repo_develop!(ctx, pkg, shared)
+        new  && push!(new_uuids, pkg.uuid)
         @assert pkg.path !== nothing
         @assert has_uuid(pkg)
         pkg.repo = GitRepo() # clear repo field, no longer needed
@@ -649,8 +578,8 @@ function handle_repos_develop!(ctx::Context, pkgs::AbstractVector{PackageSpec}, 
     return new_uuids
 end
 
-clone_path(url) = joinpath(depots1(), "clones", string(hash(url)))
-function clone_path!(ctx::Context, url)
+clone_path(url::String) = joinpath(depots1(), "clones", string(hash(url)))
+function clone_path!(ctx::Context, url::String)
     clone = clone_path(url)
     mkpath(dirname(clone))
     Base.shred!(LibGit2.CachedCredentials()) do creds
@@ -716,7 +645,7 @@ end
 
 function instantiate_pkg_repo!(ctx::Context, pkg::PackageSpec, cached_repo::Union{Nothing,String}=nothing)
     pkg.special_action = PKGSPEC_REPO_ADDED
-    clone = clone_path!(ctx, pkg.repo.url)
+    clone = clone_path!(ctx, pkg.repo.source)
     pkg.tree_hash = tree_hash(ctx, clone, pkg.repo.rev)
     version_path = Pkg.Operations.find_installed(pkg.name, pkg.uuid, pkg.tree_hash)
     if cached_repo === nothing
@@ -729,36 +658,75 @@ function instantiate_pkg_repo!(ctx::Context, pkg::PackageSpec, cached_repo::Unio
     return true
 end
 
-# partial PackageSpec -> PackageSpec with all the relevant fields filled out
-function resolve_repo_add!(ctx::Context, pkg::PackageSpec)
-    cached_repo = nothing
-    if pkg.repo.url !== nothing
-        clone_path = clone_path!(ctx, pkg.repo.url)
-        pkg.repo.rev = something(pkg.repo.rev, guess_rev(ctx, clone_path))
-        cached_repo = repo_checkout(ctx, clone_path, pkg.repo.rev)
-        package = parse_package!(ctx, pkg, cached_repo)
-    elseif pkg.name !== nothing || pkg.uuid !== nothing
-        pkg.repo.rev === nothing && pkgerror("Rev must be specified")
-        registry_resolve!(ctx, pkg)
-        ensure_resolved(ctx, [pkg]; registry=true)
-        _, pkg.repo.url = Types.registered_info(ctx, pkg.uuid, "repo")[1]
-    else
-        @assert false "Package should be specified by name, URL, or UUID" # TODO
-    end
-    return cached_repo
-end
-
 function handle_repo_add!(ctx::Context, pkg::PackageSpec)
-    cached_repo = resolve_repo_add!(ctx, pkg)
-    # if pinned, return early
+    given_abspath = nothing
+    if pkg.repo.source === nothing
+        @assert pkg.repo.rev !== nothing
+        # First, we try resolving against the manifest to avoid updating registries if at all possible.
+        # This also handles the case where we _only_ wish to switch the tracking branch for a package.
+        manifest_resolve!(ctx, [pkg]; force=true)
+        # If we could not resolve against manifest, resolve against the registry.
+        if pkg.name === nothing || pkg.uuid === nothing
+            @goto reg_resolve
+        end
+        entry = manifest_info(ctx, pkg.uuid)
+        # We still have to check this case, recall that name and UUID could both be given explicitly.
+        entry !== nothing || @goto reg_resolve 
+        if entry.pinned
+            pkg.tree_hash = entry.tree_hash # TODO why do we need this?
+            return false
+        elseif entry.repo.source !== nothing # reuse source in manifest
+            # TODO check consistency with entry
+            pkg.repo.source = entry.repo.source
+            @goto do_clone
+        end
+        @label reg_resolve
+        update_registries(ctx) # If the information not in manifest, we have no choice but to update the registry.
+        registry_resolve!(ctx, pkg)
+        if pkg.name === nothing || pkg.uuid === nothing
+            pkgerror("Package $(err_rep(pkg)) could not be found in a registry or a manifest.")
+        end
+        paths = registered_paths(ctx, pkg.uuid)
+        # We still have to check this case, both name/UUID can be given explicitly.
+        if isempty(paths)
+            pkgerror("Package with UUID `$(pkg.uuid)` could not be found in a registry.")
+        end
+        _, pkg.repo.source = Types.registered_info(ctx, pkg.uuid, "repo")[1]
+    end
+    @label do_clone
+    @assert pkg.repo.source !== nothing
+    if !isurl(pkg.repo.source)
+        given_abspath = isabspath(pkg.repo.source)
+        pkg.repo.source = try
+            realpath(pkg.repo.source)
+        catch
+            pkgerror("Path `$(pkg.repo.source)` does not exist.")
+        end
+    end
+    clone_path   = clone_path!(ctx, pkg.repo.source)
+    pkg.repo.rev = something(pkg.repo.rev, guess_rev(ctx, clone_path))
+    cached_repo  = repo_checkout(ctx, clone_path, pkg.repo.rev)
+    package      = parse_package!(ctx, pkg, cached_repo)
+    if given_abspath !== nothing && !given_abspath
+        pkg.repo.source = relative_project_path(ctx, pkg.repo.source)
+    end
+    @assert pkg.name !== nothing && pkg.uuid !== nothing &&
+        pkg.repo.source !== nothing && pkg.repo.rev !== nothing
+    # Check for pinned entry again.
     entry = manifest_info(ctx, pkg.uuid)
-    if (entry !== nothing && entry.pinned)
-        cached_repo !== nothing && rm(cached_repo; recursive=true, force=true)
+    if entry !== nothing && entry.pinned
+        rm(cached_repo; recursive=true, force=true)
         pkg.tree_hash = entry.tree_hash
         return false
     end
-    # instantiate repo
-    return instantiate_pkg_repo!(ctx, pkg, cached_repo)
+    pkg.tree_hash = tree_hash(ctx, clone_path, pkg.repo.rev)
+    # Now that we are fully resolved (name, UUID, tree_hash, repo.source, repo.rev), we can finally
+    # check to see if the package exists at its canonical path.
+    version_path = Pkg.Operations.source_path(pkg)
+    isdir(version_path) && return false
+    mkpath(version_path)
+    mv(cached_repo, version_path; force=true)
+    return true
 end
 
 """
@@ -769,6 +737,7 @@ function handle_repos_add!(ctx::Context, pkgs::AbstractVector{PackageSpec})
     new_uuids = UUID[]
     for pkg in pkgs
         handle_repo_add!(ctx, pkg) && push!(new_uuids, pkg.uuid)
+        @assert pkg.name !== nothing && pkg.uuid !== nothing && pkg.tree_hash !== nothing
     end
     return new_uuids
 end
@@ -777,7 +746,7 @@ function parse_package!(ctx, pkg, project_path)
     env = ctx.env
     project_file = projectfile_path(project_path; strict=true)
     project_file === nothing && pkgerror(string("could not find project file in pacakge at ",
-                                                pkg.repo.url !== nothing ? pkg.repo.url : (pkg.path)))
+                                                pkg.repo.source !== nothing ? pkg.repo.source : (pkg.path)))
     if project_file !== nothing
         project_data = read_package(project_file)
         pkg.uuid = project_data.uuid # TODO check no overwrite
@@ -845,7 +814,7 @@ function project_deps_resolve!(ctx::Context, pkgs::AbstractVector{PackageSpec})
 end
 
 # Disambiguate name/uuid package specifications using manifest info.
-function manifest_resolve!(ctx::Context, pkgs::AbstractVector{PackageSpec})
+function manifest_resolve!(ctx::Context, pkgs::AbstractVector{PackageSpec}; force=false)
     uuids = Dict{String,Vector{UUID}}()
     names = Dict{UUID,String}()
     for (uuid, entry) in ctx.env.manifest
@@ -853,7 +822,7 @@ function manifest_resolve!(ctx::Context, pkgs::AbstractVector{PackageSpec})
         names[uuid] = entry.name # can be duplicate but doesn't matter
     end
     for pkg in pkgs
-        pkg.mode == PKGMODE_MANIFEST || continue
+        force || pkg.mode == PKGMODE_MANIFEST || continue
         if has_name(pkg) && !has_uuid(pkg) && pkg.name in keys(uuids)
             length(uuids[pkg.name]) == 1 && (pkg.uuid = uuids[pkg.name][1])
         end
@@ -1047,7 +1016,7 @@ function clone_or_cp_registries(ctx::Context, regs::Vector{RegistrySpec}, depot:
         # slug = Base.package_slug(UUID(registry["uuid"]))
         regpath = joinpath(depot, "registries", registry["name"]#=, slug=#)
         ispath(dirname(regpath)) || mkpath(dirname(regpath))
-        if isdir_windows_workaround(regpath)
+        if Pkg.isdir_windows_workaround(regpath)
             existing_registry = read_registry(joinpath(regpath, "Registry.toml"))
             if registry["uuid"] == existing_registry["uuid"]
                 println(ctx.io,

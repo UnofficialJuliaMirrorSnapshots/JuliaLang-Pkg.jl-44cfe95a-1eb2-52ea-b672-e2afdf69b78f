@@ -2,7 +2,7 @@ module ArtifactTests
 import ..Pkg # ensure we are using the correct Pkg
 
 using Test, Random, Pkg.Artifacts, Pkg.BinaryPlatforms, Pkg.PlatformEngines
-import Pkg.Artifacts: pack_platform!, unpack_platform, with_artifacts_directory, ensure_all_artifacts_installed
+import Pkg.Artifacts: pack_platform!, unpack_platform, with_artifacts_directory, ensure_all_artifacts_installed, extract_all_hashes
 using Pkg.TOML, Dates
 import Base: SHA1
 
@@ -204,6 +204,8 @@ end
                 arty_hash = SHA1("43563e7631a7eafae1f9f8d9d332e3de44ad7239")
                 @test artifact_hash("arty", artifacts_toml) == arty_hash
 
+                @test arty_hash in extract_all_hashes(artifacts_toml)
+
                 # Ensure it's installable (we uninstall first, to make sure)
                 @test !artifact_exists(arty_hash)
 
@@ -336,23 +338,38 @@ end
     # same package context as the one we're running in right now.  Yes, this pollutes
     # the global artifact namespace and package list, but it should be harmless.
     mktempdir() do project_path
+        with_pkg_env(project_path) do
+            copy_test_package(project_path, "ArtifactInstallation")
+            Pkg.activate(joinpath(project_path))
+            add_this_pkg()
+            Pkg.add(Pkg.Types.PackageSpec(
+                name="ArtifactInstallation",
+                uuid=Base.UUID("02111abe-2050-1119-117e-b30112b5bdc4"),
+                path=joinpath(project_path, "ArtifactInstallation"),
+            ))
+
+            # Run test harness
+            Pkg.test("ArtifactInstallation")
+
+            # Also manually do it
+            Core.eval(Module(:__anon__), quote
+                using ArtifactInstallation
+                do_test()
+            end)
+        end
+    end
+
+    # Ensure that `instantiate()` installs artifacts:
+    temp_pkg_dir() do project_path
         copy_test_package(project_path, "ArtifactInstallation")
-        Pkg.activate(joinpath(project_path))
+        Pkg.activate(joinpath(project_path, "ArtifactInstallation"))
         add_this_pkg()
-        Pkg.add(Pkg.Types.PackageSpec(
-            name="ArtifactInstallation",
-            uuid=Base.UUID("02111abe-2050-1119-117e-b30112b5bdc4"),
-            path=joinpath(project_path, "ArtifactInstallation"),
-        ))
+        Pkg.instantiate(; verbose=true)
 
-        # Run test harness
-        Pkg.test("ArtifactInstallation")
-
-        # Also manually do it
-        Core.eval(Module(:__anon__), quote
-            using ArtifactInstallation
-            do_test()
-        end)
+        # Manual test that artifact is installed by instantiate()
+        artifacts_toml = joinpath(project_path, "ArtifactInstallation", "Artifacts.toml")
+        c_simple_hash = artifact_hash("c_simple", artifacts_toml)
+        @test artifact_exists(c_simple_hash)
     end
 
     # Ensure that porous platform coverage works with ensure_all_installed()
