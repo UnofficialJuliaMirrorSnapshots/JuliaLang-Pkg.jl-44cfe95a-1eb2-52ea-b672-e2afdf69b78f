@@ -23,6 +23,7 @@ logdir(depot = depots1()) = joinpath(depot, "logs")
 devdir(depot = depots1()) = get(ENV, "JULIA_PKG_DEVDIR", joinpath(depots1(), "dev"))
 envdir(depot = depots1()) = joinpath(depot, "environments")
 const UPDATED_REGISTRY_THIS_SESSION = Ref(false)
+const DEFAULT_IO = Ref{Union{Nothing,IO}}(nothing)
 
 # load snapshotted dependencies
 include("../ext/TOML/src/TOML.jl")
@@ -452,6 +453,23 @@ julia> Pkg.setprotocol!(domain = "gitlab.mycompany.com")
 const setprotocol! = API.setprotocol!
 
 """
+    undo()
+
+Undoes the latest change to the active project. Only states in the current session are stored,
+up to a maximum of $(API.max_undo_limit) states.
+
+See also: [`redo`](@ref).
+"""
+const undo = API.undo
+
+"""
+    redo()
+
+Redoes the changes from the latest [`undo`](@ref).
+"""
+const redo = API.redo
+
+"""
     RegistrySpec(name::String)
     RegistrySpec(; name, url, path)
 
@@ -489,6 +507,7 @@ function __init__()
             end
         end
     end
+    API.add_snapshot_to_undo()
 end
 
 ##################

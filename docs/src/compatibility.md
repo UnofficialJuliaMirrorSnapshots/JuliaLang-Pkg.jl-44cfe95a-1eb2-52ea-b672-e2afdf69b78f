@@ -31,28 +31,33 @@ Example = "1.2, 2"
 ```
 will result in `[1.2.0, 3.0.0)`.
 
-### Pre-1.0 behavior
+### Behavior of versions with leading zeros (0.0.x and 0.x.y)
 
 While the semver specification says that all versions with a major version of 0 (versions before 1.0.0) are incompatible
 with each other, we have decided to only apply that for when both the major and minor versions are zero. In other words,
-0.0.1 and 0.0.2 are considered incompatible. When the minor version is not zero, versions with the same minor versions
-are considered compatible, i.e. the two versions 0.2.1 and 0.2.3 are considered compatible. Versions with a major version
-of 0 and different minor versions are not considered compatible, so the version 0.3.0 might have breaking changes from
-0.2.0. To that end, the `[compat]` entry:
+0.0.1 and 0.0.2 are considered incompatible. A pre-1.0 version with non-zero minor version (`0.a.b` with `a != 0`) is
+considered compatible with versions with the same minor version and smaller or equal patch versions (`0.a.c` with `c <= b`);
+i.e., the versions 0.2.2 and 0.2.3 are compatible with 0.2.1 and 0.2.0. Versions with a major version of 0 and different
+minor versions are not considered compatible, so the version 0.3.0 might have breaking changes from 0.2.0. To that end, the
+`[compat]` entry:
 
 ```julia
 [compat]
 Example = "0.0.1"
 ```
 
-results in a versionbound on `Example` as [0.0.1, 0.02) (which is equivalent to only the version 0.0.1), while the `[compat]` entry:
+results in a versionbound on `Example` as `[0.0.1, 0.02)` (which is equivalent to only the version 0.0.1), while the
+`[compat]` entry:
 
 ```julia
 [compat]
-Example = "0.2"
+Example = "0.2.1"
 ```
 
-results in a versionbound on Example as [0.2.0, 0.3.0), (which is equivalent to all versions starting with 0.2).
+results in a versionbound on Example as `[0.2.1, 0.3.0)`.
+
+In particular, a package may set `version = "0.2.4"` when it has feature additions compared to 0.2.3 as long as it
+remains backward compatible with 0.2.0.  See also [The `version` field](@ref).
 
 ### Caret specifiers
 
